@@ -104,6 +104,9 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
   // Language -- managed by LanguageSelectActivity, not in SettingsList.
   // Stored as ISO code string ("EN", "DE", ...) for stability across enum reorders.
   doc["language"] = (language < getLanguageCount()) ? LANGUAGE_CODES[language] : "EN";
+
+  // Battery Stats: managed by BatteryStatsActivity, not in SettingsList.
+  doc["lowBatteryThresholdPercent"] = lowBatteryThresholdPercent;
 }
 
 bool CrossPointSettings::fromJson(JsonVariantConst doc) {
@@ -221,6 +224,12 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
   if (doc["language"].is<const char*>()) {
     language = static_cast<uint8_t>(I18n::languageFromCode(doc["language"].as<const char*>()));
   }
+
+  // Battery Stats: managed by BatteryStatsActivity, not in SettingsList.
+  uint8_t storedLowBatteryThreshold = doc["lowBatteryThresholdPercent"] | (uint8_t)10;
+  if (storedLowBatteryThreshold < LOW_BATTERY_THRESHOLD_MIN) storedLowBatteryThreshold = LOW_BATTERY_THRESHOLD_MIN;
+  if (storedLowBatteryThreshold > LOW_BATTERY_THRESHOLD_MAX) storedLowBatteryThreshold = LOW_BATTERY_THRESHOLD_MAX;
+  lowBatteryThresholdPercent = storedLowBatteryThreshold;
 
   if (needsResave) {
     LOG_DBG("CPS", "Resaving settings to update format");

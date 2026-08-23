@@ -24,6 +24,16 @@ class CrossPointState : public PersistableStore<CrossPointState> {
   bool lastSleepFromReader = false;
   bool showBootScreen = true;
 
+  // Battery discharge-session tracking, updated by ReadingLogger::logPageTurn()
+  // only when the sampled battery% or charging state actually changes. Powers
+  // the Battery Stats screen's instant (zero-SD-I/O) stat display.
+  uint32_t battSessionStartEpoch = 0;
+  uint8_t battSessionStartPct = 0;
+  uint32_t battLastSampleEpoch = 0;
+  uint8_t battLastSamplePct = 0;
+  bool battLastCharging = false;
+  bool battHasSample = false;
+
   static const char* getFilePath() { return "/.crosspoint/state.json"; }
   void toJson(JsonDocument& doc) const;
   bool fromJson(JsonVariantConst doc);
