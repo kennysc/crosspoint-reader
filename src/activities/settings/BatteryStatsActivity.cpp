@@ -55,6 +55,15 @@ void formatEta(char* buf, size_t n, int32_t secondsLeft) {
   }
 }
 
+// Label left-justified, value right-justified within [leftX, rightEdge] -- matches
+// the label/value row layout used across the rest of the UI (see BaseTheme::drawSubHeader).
+void drawStatRow(const GfxRenderer& renderer, int leftX, int rightEdge, int y, const char* label, const char* value,
+                 EpdFontFamily::Style style = EpdFontFamily::REGULAR) {
+  renderer.drawText(UI_10_FONT_ID, leftX, y, label, true, style);
+  const int valueWidth = renderer.getTextWidth(UI_10_FONT_ID, value, style);
+  renderer.drawText(UI_10_FONT_ID, rightEdge - valueWidth, y, value, true, style);
+}
+
 }  // namespace
 
 void BatteryStatsActivity::onEnter() {
@@ -154,46 +163,40 @@ void BatteryStatsActivity::render(RenderLock&&) {
   renderer.clearScreen();
   GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_BATTERY_STATS));
 
+  const int leftX = metrics.contentSidePadding;
+  const int rightEdge = pageWidth - metrics.contentSidePadding;
   int y = metrics.topPadding + metrics.headerHeight + 30;
   constexpr int LINE_H = 28;
-  char line[64];
+  char value[24];
 
-  char rate[24];
-  formatRate(rate, sizeof(rate), liveTracker.avgDischargePctPerHour());
-  snprintf(line, sizeof(line), "%s: %s", tr(STR_AVG_DISCHARGE_RATE), rate);
-  renderer.drawCenteredText(UI_10_FONT_ID, y, line);
+  formatRate(value, sizeof(value), liveTracker.avgDischargePctPerHour());
+  drawStatRow(renderer, leftX, rightEdge, y, tr(STR_AVG_DISCHARGE_RATE), value);
   y += LINE_H;
 
-  char eta[24];
-  formatEta(eta, sizeof(eta), liveTracker.estimatedSecondsLeft(SETTINGS.lowBatteryThresholdPercent));
-  snprintf(line, sizeof(line), "%s: %s", tr(STR_EST_TIME_LEFT), eta);
-  renderer.drawCenteredText(UI_10_FONT_ID, y, line);
+  formatEta(value, sizeof(value), liveTracker.estimatedSecondsLeft(SETTINGS.lowBatteryThresholdPercent));
+  drawStatRow(renderer, leftX, rightEdge, y, tr(STR_EST_TIME_LEFT), value);
   y += LINE_H;
 
-  char readTime[24];
-  formatDuration(readTime, sizeof(readTime), liveTracker.totalReadSeconds());
-  snprintf(line, sizeof(line), "%s: %s", tr(STR_TOTAL_READ_TIME), readTime);
-  renderer.drawCenteredText(UI_10_FONT_ID, y, line);
+  formatDuration(value, sizeof(value), liveTracker.totalReadSeconds());
+  drawStatRow(renderer, leftX, rightEdge, y, tr(STR_TOTAL_READ_TIME), value);
   y += LINE_H;
 
-  snprintf(line, sizeof(line), "%s: %u%%", tr(STR_LOW_BATTERY_THRESHOLD), SETTINGS.lowBatteryThresholdPercent);
-  renderer.drawCenteredText(UI_10_FONT_ID, y, line, true, EpdFontFamily::BOLD);
+  snprintf(value, sizeof(value), "%u%%", SETTINGS.lowBatteryThresholdPercent);
+  drawStatRow(renderer, leftX, rightEdge, y, tr(STR_LOW_BATTERY_THRESHOLD), value, EpdFontFamily::BOLD);
   y += LINE_H + 10;
 
   if (state == VERIFYING) {
     renderer.drawCenteredText(UI_10_FONT_ID, y, tr(STR_VERIFYING));
   } else if (state == VERIFIED) {
-    renderer.drawCenteredText(UI_10_FONT_ID, y, tr(STR_FROM_LOG), true, EpdFontFamily::BOLD);
+    renderer.drawText(UI_10_FONT_ID, leftX, y, tr(STR_FROM_LOG), true, EpdFontFamily::BOLD);
     y += LINE_H;
 
-    formatRate(rate, sizeof(rate), logTracker.avgDischargePctPerHour());
-    snprintf(line, sizeof(line), "%s: %s", tr(STR_AVG_DISCHARGE_RATE), rate);
-    renderer.drawCenteredText(UI_10_FONT_ID, y, line);
+    formatRate(value, sizeof(value), logTracker.avgDischargePctPerHour());
+    drawStatRow(renderer, leftX, rightEdge, y, tr(STR_AVG_DISCHARGE_RATE), value);
     y += LINE_H;
 
-    formatDuration(readTime, sizeof(readTime), logTracker.totalReadSeconds());
-    snprintf(line, sizeof(line), "%s: %s", tr(STR_TOTAL_READ_TIME), readTime);
-    renderer.drawCenteredText(UI_10_FONT_ID, y, line);
+    formatDuration(value, sizeof(value), logTracker.totalReadSeconds());
+    drawStatRow(renderer, leftX, rightEdge, y, tr(STR_TOTAL_READ_TIME), value);
   }
 
   if (state != VERIFYING) {
