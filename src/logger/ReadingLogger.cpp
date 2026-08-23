@@ -2,8 +2,8 @@
 
 #include <HalStorage.h>
 #include <Rtc.h>
-#include "hal/HalClock.h"
-#include "hal/HalPowerManager.h"
+#include "HalClock.h"
+#include "HalPowerManager.h"
 
 static constexpr const char* LOG_PATH = "/.crosspoint/reading_log.csv";
 
