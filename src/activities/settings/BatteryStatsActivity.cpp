@@ -1,6 +1,7 @@
 #include "BatteryStatsActivity.h"
 
 #include <GfxRenderer.h>
+#include <HalPowerManager.h>
 #include <HalStorage.h>
 #include <I18n.h>
 
@@ -17,15 +18,15 @@ namespace {
 
 // Parses one reading_log.csv row ("timestamp,battery_pct,voltage_mv,charging[,active_read_seconds]")
 // and feeds it into tracker, tallying completed charge cycles and their lifetime
-// active-reading total along the way. The active_read_seconds field is a trusted
-// per-row checkpoint (written by ReadingLogger at the same instant), not something
-// replayed here -- the log has no per-page-turn timestamps to recompute it from.
-// Silently ignores the header row and any malformed line (sscanf field-count
+// active-reading/discharge totals along the way. The active_read_seconds field is a
+// trusted per-row checkpoint (written by ReadingLogger at the same instant), not
+// something replayed here -- the log has no per-page-turn timestamps to recompute it
+// from. Silently ignores the header row and any malformed line (sscanf field-count
 // mismatch below 9), since both simply fail to match the format. Rows written
 // before this field existed parse as 9 fields and are tolerated for backward
 // compatibility, just without contributing a trustworthy active-time checkpoint.
 void parseLogLine(const char* line, BatterySessionTracker& tracker, uint32_t& completedCycles,
-                  uint32_t& lifetimeActiveSeconds) {
+                  uint32_t& lifetimeActiveSeconds, uint32_t& lifetimePctDrop, char* firstEntryDate) {
   uint16_t year, mv;
   uint8_t month, day, hour, minute, second, pct;
   int charging;
@@ -35,13 +36,20 @@ void parseLogLine(const char* line, BatterySessionTracker& tracker, uint32_t& co
   if (fields != 9 && fields != 10) return;
   if (year == 0) return;  // RTC-unavailable sentinel row
 
+  if (firstEntryDate[0] == '\0') {
+    snprintf(firstEntryDate, 11, "%04u-%02u-%02u", year, month, day);
+  }
+
   // Unknown charging reads carry forward the last known state, matching ReadingLogger's rule.
   const bool chargingBool = (charging == -1) ? tracker.lastCharging : (charging == 1);
   if (tracker.hasSample && tracker.lastCharging && !chargingBool) {
     // This row starts a new discharge session -- the session that was open going
-    // into it just completed; fold its final tally into the lifetime total.
+    // into it just completed; fold its final tallies into the lifetime totals.
     completedCycles++;
     lifetimeActiveSeconds += tracker.activeReadSeconds;
+    if (tracker.sessionStartPct > tracker.lastSamplePct) {
+      lifetimePctDrop += tracker.sessionStartPct - tracker.lastSamplePct;
+    }
   }
   tracker.observe(batteryEpochFromParts(year, month, day, hour, minute, second), pct, chargingBool);
   if (fields == 10) tracker.activeReadSeconds = loggedActiveSeconds;
@@ -57,6 +65,14 @@ void formatRate(char* buf, size_t n, float pctPerHour) {
   } else {
     snprintf(buf, n, "%.1f %%/hr", pctPerHour);
   }
+}
+
+// Average discharge rate in percent per active-reading hour, across all completed
+// charge cycles in the log (not just the current session). 0 if no completed cycle
+// has been observed yet.
+float lifetimeAvgDischargeRate(uint32_t pctDrop, uint32_t activeSeconds) {
+  if (activeSeconds == 0) return 0.0f;
+  return static_cast<float>(pctDrop) / (static_cast<float>(activeSeconds) / 3600.0f);
 }
 
 void formatEta(char* buf, size_t n, int32_t secondsLeft) {
@@ -82,7 +98,7 @@ void drawStatRow(const GfxRenderer& renderer, int leftX, int rightEdge, int y, c
 
 void BatteryStatsActivity::onEnter() {
   Activity::onEnter();
-  state = IDLE;
+  state = LOADING;
 
   liveTracker.sessionStartEpoch = APP_STATE.battSessionStartEpoch;
   liveTracker.sessionStartPct = APP_STATE.battSessionStartPct;
@@ -110,6 +126,9 @@ void BatteryStatsActivity::scanLog() {
   logTracker = BatterySessionTracker();
   logCompletedCycles = 0;
   logLifetimeActiveSeconds = 0;
+  logCompletedActiveSeconds = 0;
+  logLifetimePctDrop = 0;
+  logFirstEntryDate[0] = '\0';
 
   HalFile f = Storage.open(ReadingLogger::logPath(), O_RDONLY);
   if (!f) return;
@@ -127,7 +146,10 @@ void BatteryStatsActivity::scanLog() {
       const char c = chunk[i];
       if (c == '\n') {
         lineBuf[lineLen] = '\0';
-        if (lineLen > 0) parseLogLine(lineBuf, logTracker, logCompletedCycles, logLifetimeActiveSeconds);
+        if (lineLen > 0) {
+          parseLogLine(lineBuf, logTracker, logCompletedCycles, logLifetimeActiveSeconds, logLifetimePctDrop,
+                       logFirstEntryDate);
+        }
         lineLen = 0;
       } else if (lineLen < MAX_LINE - 1) {
         lineBuf[lineLen++] = c;
@@ -137,28 +159,26 @@ void BatteryStatsActivity::scanLog() {
   }
   if (lineLen > 0) {
     lineBuf[lineLen] = '\0';
-    parseLogLine(lineBuf, logTracker, logCompletedCycles, logLifetimeActiveSeconds);
+    parseLogLine(lineBuf, logTracker, logCompletedCycles, logLifetimeActiveSeconds, logLifetimePctDrop,
+                 logFirstEntryDate);
   }
   f.close();
 
-  // The still-open session (if any) hasn't completed a cycle yet, but its reading
-  // time so far is still part of the lifetime total.
+  // logCompletedActiveSeconds reflects only completed cycles (the denominator for the
+  // lifetime avg discharge rate); logLifetimeActiveSeconds additionally folds in the
+  // still-open session's reading time so far, since that's part of the lifetime total.
+  logCompletedActiveSeconds = logLifetimeActiveSeconds;
   logLifetimeActiveSeconds += logTracker.activeReadSeconds;
 }
 
-void BatteryStatsActivity::beginVerify() {
-  {
-    RenderLock lock(*this);
-    state = VERIFYING;
-  }
-  requestUpdateAndWait();
-  scanLog();
-  state = VERIFIED;
-  requestUpdate();
-}
-
 void BatteryStatsActivity::loop() {
-  if (state == VERIFYING) return;  // beginVerify() runs synchronously to completion
+  if (state == LOADING) {
+    requestUpdateAndWait();  // paint the "Loading..." screen before blocking on the SD scan
+    scanLog();
+    state = READY;
+    requestUpdate();
+    return;
+  }
 
   if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
     goBack();
@@ -170,10 +190,6 @@ void BatteryStatsActivity::loop() {
   }
   if (mappedInput.wasPressed(MappedInputManager::Button::Right)) {
     adjustThreshold(1);
-    return;
-  }
-  if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
-    beginVerify();
     return;
   }
 }
@@ -203,13 +219,22 @@ void BatteryStatsActivity::render(RenderLock&&) {
   drawStatRow(renderer, leftX, rightEdge, y, tr(STR_TOTAL_READ_TIME), value);
   y += LINE_H;
 
+  const auto battStatus = powerManager.getBatteryStatus();
+  if (battStatus.millivoltsKnown) {
+    snprintf(value, sizeof(value), "%u mV", battStatus.millivolts);
+  } else {
+    snprintf(value, sizeof(value), "%s", tr(STR_NOT_AVAILABLE));
+  }
+  drawStatRow(renderer, leftX, rightEdge, y, tr(STR_BATTERY_VOLTAGE), value);
+  y += LINE_H;
+
   snprintf(value, sizeof(value), "%u%%", SETTINGS.lowBatteryThresholdPercent);
   drawStatRow(renderer, leftX, rightEdge, y, tr(STR_LOW_BATTERY_THRESHOLD), value, EpdFontFamily::BOLD);
   y += LINE_H + 10;
 
-  if (state == VERIFYING) {
-    renderer.drawCenteredText(UI_10_FONT_ID, y, tr(STR_VERIFYING));
-  } else if (state == VERIFIED) {
+  if (state == LOADING) {
+    renderer.drawCenteredText(UI_10_FONT_ID, y, tr(STR_LOADING));
+  } else {
     renderer.drawText(UI_10_FONT_ID, leftX, y, tr(STR_FROM_LOG), true, EpdFontFamily::BOLD);
     y += LINE_H;
 
@@ -227,10 +252,18 @@ void BatteryStatsActivity::render(RenderLock&&) {
 
     formatDuration(value, sizeof(value), logLifetimeActiveSeconds);
     drawStatRow(renderer, leftX, rightEdge, y, tr(STR_LIFETIME_READ_TIME), value);
+    y += LINE_H;
+
+    formatRate(value, sizeof(value), lifetimeAvgDischargeRate(logLifetimePctDrop, logCompletedActiveSeconds));
+    drawStatRow(renderer, leftX, rightEdge, y, tr(STR_LIFETIME_AVG_DISCHARGE_RATE), value);
+    y += LINE_H;
+
+    snprintf(value, sizeof(value), "%s", logFirstEntryDate[0] ? logFirstEntryDate : tr(STR_NOT_AVAILABLE));
+    drawStatRow(renderer, leftX, rightEdge, y, tr(STR_LOGGING_SINCE), value);
   }
 
-  if (state != VERIFYING) {
-    const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_VERIFY_FROM_LOG), "-", "+");
+  if (state != LOADING) {
+    const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "-", "+");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   }
 
