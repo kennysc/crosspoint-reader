@@ -31,6 +31,15 @@ void ReadingLogger::logPageTurn() {
     tracker.lastSamplePct = APP_STATE.battLastSamplePct;
     tracker.lastCharging = APP_STATE.battLastCharging;
     tracker.hasSample = APP_STATE.battHasSample;
+    tracker.activeReadSeconds = APP_STATE.battActiveReadSeconds;
+    tracker.lastPageTurnEpoch = APP_STATE.battLastPageTurnEpoch;
+
+    // Accumulate active-reading time on every page turn, not just when the battery
+    // sample changes -- this is a pure in-RAM update (APP_STATE is memory-resident),
+    // flushed to SD only at the existing save points below and in enterDeepSleep().
+    tracker.observePageTurn(epoch);
+    APP_STATE.battActiveReadSeconds = tracker.activeReadSeconds;
+    APP_STATE.battLastPageTurnEpoch = tracker.lastPageTurnEpoch;
 
     // Unknown charging reads carry forward the last known state rather than
     // forcing a (possibly spurious) charge/discharge transition.
@@ -67,5 +76,7 @@ void ReadingLogger::logPageTurn() {
     APP_STATE.battLastSamplePct = tracker.lastSamplePct;
     APP_STATE.battLastCharging = tracker.lastCharging;
     APP_STATE.battHasSample = tracker.hasSample;
+    APP_STATE.battActiveReadSeconds = tracker.activeReadSeconds;
+    APP_STATE.battLastPageTurnEpoch = tracker.lastPageTurnEpoch;
     APP_STATE.saveToFile();
 }

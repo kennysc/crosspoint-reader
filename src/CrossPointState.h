@@ -33,6 +33,8 @@ class CrossPointState : public PersistableStore<CrossPointState> {
   uint8_t battLastSamplePct = 0;
   bool battLastCharging = false;
   bool battHasSample = false;
+  uint32_t battActiveReadSeconds = 0;
+  uint32_t battLastPageTurnEpoch = 0;
 
   static const char* getFilePath() { return "/.crosspoint/state.json"; }
   void toJson(JsonDocument& doc) const;

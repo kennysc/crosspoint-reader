@@ -18,10 +18,33 @@ struct BatterySessionTracker {
   bool lastCharging = false;
   bool hasSample = false;
 
+  // Accumulated active-reading seconds this discharge session, and the epoch of
+  // the previous page turn (baseline for accumulating the next delta). Updated
+  // on every page turn regardless of whether the battery sample changed.
+  uint32_t activeReadSeconds = 0;
+  uint32_t lastPageTurnEpoch = 0;
+
+  // Gaps between page turns longer than this indicate the device was idle or
+  // asleep, not being actively read, so they're excluded from activeReadSeconds.
+  static constexpr uint32_t MAX_ACTIVE_GAP_SECONDS = 600;
+
+  // Called on every page turn (not gated by battery-sample change) to accumulate
+  // active-reading time in small increments even when battery% hasn't moved.
+  void observePageTurn(uint32_t epoch) {
+    if (epoch == 0) return;  // no RTC
+    if (lastPageTurnEpoch != 0 && epoch > lastPageTurnEpoch) {
+      const uint32_t delta = epoch - lastPageTurnEpoch;
+      if (delta <= MAX_ACTIVE_GAP_SECONDS) activeReadSeconds += delta;
+    }
+    lastPageTurnEpoch = epoch;
+  }
+
   void observe(uint32_t epoch, uint8_t pct, bool charging) {
     if (!hasSample || (lastCharging && !charging)) {  // first sample, or charge->discharge transition
       sessionStartEpoch = epoch;
       sessionStartPct = pct;
+      activeReadSeconds = 0;
+      lastPageTurnEpoch = epoch;  // fresh baseline so a stale pre-session gap isn't counted
     }
     lastSampleEpoch = epoch;
     lastSamplePct = pct;
@@ -29,15 +52,28 @@ struct BatterySessionTracker {
     hasSample = true;
   }
 
-  // Seconds spanned by the current discharge session. 0 if charging or no data yet.
-  uint32_t totalReadSeconds() const {
+  // Active-reading seconds accumulated this discharge session. 0 if charging or no data yet.
+  uint32_t totalReadSeconds() const { return lastCharging ? 0 : activeReadSeconds; }
+
+  // Average discharge rate in percent per active-reading hour. 0 if not enough data to estimate.
+  float avgDischargePctPerHour() const {
+    const uint32_t seconds = totalReadSeconds();
+    if (seconds == 0 || sessionStartPct <= lastSamplePct) return 0.0f;
+    const float hours = static_cast<float>(seconds) / 3600.0f;
+    return static_cast<float>(sessionStartPct - lastSamplePct) / hours;
+  }
+
+  // Wall-clock seconds since session start. Only meaningful for the CSV-replay path
+  // (BatteryStatsActivity::parseLogLine), which lacks per-page-turn timestamps and
+  // so can't reconstruct active-reading time -- this is the best the sparse log can offer.
+  uint32_t wallClockElapsedSeconds() const {
     if (!hasSample || lastCharging || lastSampleEpoch <= sessionStartEpoch) return 0;
     return lastSampleEpoch - sessionStartEpoch;
   }
 
-  // Average discharge rate in percent per hour. 0 if not enough data to estimate.
-  float avgDischargePctPerHour() const {
-    const uint32_t seconds = totalReadSeconds();
+  // Average discharge rate in percent per wall-clock hour, for the CSV-replay path.
+  float wallClockDischargePctPerHour() const {
+    const uint32_t seconds = wallClockElapsedSeconds();
     if (seconds == 0 || sessionStartPct <= lastSamplePct) return 0.0f;
     const float hours = static_cast<float>(seconds) / 3600.0f;
     return static_cast<float>(sessionStartPct - lastSamplePct) / hours;

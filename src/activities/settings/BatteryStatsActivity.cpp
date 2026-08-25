@@ -76,6 +76,8 @@ void BatteryStatsActivity::onEnter() {
   liveTracker.lastSamplePct = APP_STATE.battLastSamplePct;
   liveTracker.lastCharging = APP_STATE.battLastCharging;
   liveTracker.hasSample = APP_STATE.battHasSample;
+  liveTracker.activeReadSeconds = APP_STATE.battActiveReadSeconds;
+  liveTracker.lastPageTurnEpoch = APP_STATE.battLastPageTurnEpoch;
 
   requestUpdate();
 }
@@ -191,12 +193,12 @@ void BatteryStatsActivity::render(RenderLock&&) {
     renderer.drawText(UI_10_FONT_ID, leftX, y, tr(STR_FROM_LOG), true, EpdFontFamily::BOLD);
     y += LINE_H;
 
-    formatRate(value, sizeof(value), logTracker.avgDischargePctPerHour());
+    formatRate(value, sizeof(value), logTracker.wallClockDischargePctPerHour());
     drawStatRow(renderer, leftX, rightEdge, y, tr(STR_AVG_DISCHARGE_RATE), value);
     y += LINE_H;
 
-    formatDuration(value, sizeof(value), logTracker.totalReadSeconds());
-    drawStatRow(renderer, leftX, rightEdge, y, tr(STR_TOTAL_READ_TIME), value);
+    formatDuration(value, sizeof(value), logTracker.wallClockElapsedSeconds());
+    drawStatRow(renderer, leftX, rightEdge, y, tr(STR_ELAPSED_SINCE_CHARGE), value);
   }
 
   if (state != VERIFYING) {
