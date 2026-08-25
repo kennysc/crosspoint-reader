@@ -94,6 +94,15 @@ void drawStatRow(const GfxRenderer& renderer, int leftX, int rightEdge, int y, c
   renderer.drawText(UI_10_FONT_ID, rightEdge - valueWidth, y, value, true, style);
 }
 
+// Section divider: bold label at UI_10_FONT_ID (same size as body rows, unlike the bolder,
+// larger page header) with a thin rule underneath for emphasis -- mirrors the text+rule idiom
+// LyraTheme::drawSubHeader uses, without its fixed single-per-screen band contract.
+void drawSectionHeader(const GfxRenderer& renderer, int leftX, int rightEdge, int y, const char* title) {
+  renderer.drawText(UI_10_FONT_ID, leftX, y, title, true, EpdFontFamily::BOLD);
+  const int ruleY = y + renderer.getTextHeight(UI_10_FONT_ID) + 2;
+  renderer.drawLine(leftX, ruleY, rightEdge, ruleY);
+}
+
 }  // namespace
 
 void BatteryStatsActivity::onEnter() {
@@ -206,6 +215,10 @@ void BatteryStatsActivity::render(RenderLock&&) {
   int y = metrics.topPadding + metrics.headerHeight + 30;
   constexpr int LINE_H = 28;
   char value[24];
+  char historyTitle[40];
+
+  drawSectionHeader(renderer, leftX, rightEdge, y, tr(STR_CURRENT_CHARGE_CYCLE));
+  y += LINE_H;
 
   formatRate(value, sizeof(value), liveTracker.avgDischargePctPerHour());
   drawStatRow(renderer, leftX, rightEdge, y, tr(STR_AVG_DISCHARGE_RATE), value);
@@ -235,15 +248,9 @@ void BatteryStatsActivity::render(RenderLock&&) {
   if (state == LOADING) {
     renderer.drawCenteredText(UI_10_FONT_ID, y, tr(STR_LOADING));
   } else {
-    renderer.drawText(UI_10_FONT_ID, leftX, y, tr(STR_FROM_LOG), true, EpdFontFamily::BOLD);
-    y += LINE_H;
-
-    formatRate(value, sizeof(value), logTracker.avgDischargePctPerHour());
-    drawStatRow(renderer, leftX, rightEdge, y, tr(STR_AVG_DISCHARGE_RATE), value);
-    y += LINE_H;
-
-    formatDuration(value, sizeof(value), logTracker.totalReadSeconds());
-    drawStatRow(renderer, leftX, rightEdge, y, tr(STR_TOTAL_READ_TIME), value);
+    snprintf(historyTitle, sizeof(historyTitle), tr(STR_BATTERY_HISTORY_SINCE_FORMAT),
+             logFirstEntryDate[0] ? logFirstEntryDate : tr(STR_NOT_AVAILABLE));
+    drawSectionHeader(renderer, leftX, rightEdge, y, historyTitle);
     y += LINE_H;
 
     snprintf(value, sizeof(value), "%u", logCompletedCycles);
@@ -256,10 +263,6 @@ void BatteryStatsActivity::render(RenderLock&&) {
 
     formatRate(value, sizeof(value), lifetimeAvgDischargeRate(logLifetimePctDrop, logCompletedActiveSeconds));
     drawStatRow(renderer, leftX, rightEdge, y, tr(STR_LIFETIME_AVG_DISCHARGE_RATE), value);
-    y += LINE_H;
-
-    snprintf(value, sizeof(value), "%s", logFirstEntryDate[0] ? logFirstEntryDate : tr(STR_NOT_AVAILABLE));
-    drawStatRow(renderer, leftX, rightEdge, y, tr(STR_LOGGING_SINCE), value);
   }
 
   if (state != LOADING) {
