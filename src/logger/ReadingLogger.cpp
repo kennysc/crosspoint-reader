@@ -55,7 +55,7 @@ void ReadingLogger::logPageTurn() {
     if (!f) return;
 
     if (isNew) {
-        f.println("timestamp,battery_pct,voltage_mv,charging");
+        f.println("timestamp,battery_pct,voltage_mv,charging,active_read_seconds");
     }
 
     char ts[20] = "0000-00-00T00:00:00";
@@ -64,8 +64,11 @@ void ReadingLogger::logPageTurn() {
                  dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second);
     }
 
-    char line[48];
-    snprintf(line, sizeof(line), "%s,%u,%u,%d\n", ts, pct, mv, chargingRaw);
+    // active_read_seconds is the tally for the session/interval that was open going
+    // into this row (pre-observe()) -- readers replaying the log get a trusted
+    // per-row checkpoint instead of having to reconstruct active time from timestamps.
+    char line[64];
+    snprintf(line, sizeof(line), "%s,%u,%u,%d,%u\n", ts, pct, mv, chargingRaw, tracker.activeReadSeconds);
     f.write(reinterpret_cast<const uint8_t*>(line), strlen(line));
     f.close();
 

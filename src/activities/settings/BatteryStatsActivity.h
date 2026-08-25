@@ -25,6 +25,11 @@ class BatteryStatsActivity final : public Activity {
   BatterySessionTracker liveTracker;  // From CrossPointState -- instant, no SD I/O
   BatterySessionTracker logTracker;   // From scanning reading_log.csv -- only after Verify
 
+  // Lifetime aggregates across every charge cycle recorded in the log -- data
+  // CrossPointState can never hold, since it resets each cycle. Only after Verify.
+  uint32_t logCompletedCycles = 0;
+  uint32_t logLifetimeActiveSeconds = 0;
+
   void goBack() { finish(); }
   void adjustThreshold(int delta);
   void beginVerify();

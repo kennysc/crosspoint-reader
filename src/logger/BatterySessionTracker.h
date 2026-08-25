@@ -63,22 +63,6 @@ struct BatterySessionTracker {
     return static_cast<float>(sessionStartPct - lastSamplePct) / hours;
   }
 
-  // Wall-clock seconds since session start. Only meaningful for the CSV-replay path
-  // (BatteryStatsActivity::parseLogLine), which lacks per-page-turn timestamps and
-  // so can't reconstruct active-reading time -- this is the best the sparse log can offer.
-  uint32_t wallClockElapsedSeconds() const {
-    if (!hasSample || lastCharging || lastSampleEpoch <= sessionStartEpoch) return 0;
-    return lastSampleEpoch - sessionStartEpoch;
-  }
-
-  // Average discharge rate in percent per wall-clock hour, for the CSV-replay path.
-  float wallClockDischargePctPerHour() const {
-    const uint32_t seconds = wallClockElapsedSeconds();
-    if (seconds == 0 || sessionStartPct <= lastSamplePct) return 0.0f;
-    const float hours = static_cast<float>(seconds) / 3600.0f;
-    return static_cast<float>(sessionStartPct - lastSamplePct) / hours;
-  }
-
   // Estimated seconds left until thresholdPct, or -1 if not estimable (charging,
   // no discharge observed yet). 0 if already at or under the threshold.
   int32_t estimatedSecondsLeft(uint8_t thresholdPct) const {

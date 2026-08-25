@@ -15,22 +15,36 @@
 
 namespace {
 
-// Parses one reading_log.csv row ("timestamp,battery_pct,voltage_mv,charging")
-// and feeds it into tracker. Silently ignores the header row and any malformed
-// line (sscanf field-count mismatch), since both simply fail to match the format.
-void parseLogLine(const char* line, BatterySessionTracker& tracker) {
+// Parses one reading_log.csv row ("timestamp,battery_pct,voltage_mv,charging[,active_read_seconds]")
+// and feeds it into tracker, tallying completed charge cycles and their lifetime
+// active-reading total along the way. The active_read_seconds field is a trusted
+// per-row checkpoint (written by ReadingLogger at the same instant), not something
+// replayed here -- the log has no per-page-turn timestamps to recompute it from.
+// Silently ignores the header row and any malformed line (sscanf field-count
+// mismatch below 9), since both simply fail to match the format. Rows written
+// before this field existed parse as 9 fields and are tolerated for backward
+// compatibility, just without contributing a trustworthy active-time checkpoint.
+void parseLogLine(const char* line, BatterySessionTracker& tracker, uint32_t& completedCycles,
+                  uint32_t& lifetimeActiveSeconds) {
   uint16_t year, mv;
   uint8_t month, day, hour, minute, second, pct;
   int charging;
-  if (sscanf(line, "%hu-%hhu-%hhuT%hhu:%hhu:%hhu,%hhu,%hu,%d", &year, &month, &day, &hour, &minute, &second, &pct,
-             &mv, &charging) != 9) {
-    return;
-  }
+  uint32_t loggedActiveSeconds = 0;
+  const int fields = sscanf(line, "%hu-%hhu-%hhuT%hhu:%hhu:%hhu,%hhu,%hu,%d,%u", &year, &month, &day, &hour, &minute,
+                            &second, &pct, &mv, &charging, &loggedActiveSeconds);
+  if (fields != 9 && fields != 10) return;
   if (year == 0) return;  // RTC-unavailable sentinel row
 
   // Unknown charging reads carry forward the last known state, matching ReadingLogger's rule.
   const bool chargingBool = (charging == -1) ? tracker.lastCharging : (charging == 1);
+  if (tracker.hasSample && tracker.lastCharging && !chargingBool) {
+    // This row starts a new discharge session -- the session that was open going
+    // into it just completed; fold its final tally into the lifetime total.
+    completedCycles++;
+    lifetimeActiveSeconds += tracker.activeReadSeconds;
+  }
   tracker.observe(batteryEpochFromParts(year, month, day, hour, minute, second), pct, chargingBool);
+  if (fields == 10) tracker.activeReadSeconds = loggedActiveSeconds;
 }
 
 void formatDuration(char* buf, size_t n, uint32_t seconds) {
@@ -94,6 +108,8 @@ void BatteryStatsActivity::adjustThreshold(int delta) {
 
 void BatteryStatsActivity::scanLog() {
   logTracker = BatterySessionTracker();
+  logCompletedCycles = 0;
+  logLifetimeActiveSeconds = 0;
 
   HalFile f = Storage.open(ReadingLogger::logPath(), O_RDONLY);
   if (!f) return;
@@ -111,7 +127,7 @@ void BatteryStatsActivity::scanLog() {
       const char c = chunk[i];
       if (c == '\n') {
         lineBuf[lineLen] = '\0';
-        if (lineLen > 0) parseLogLine(lineBuf, logTracker);
+        if (lineLen > 0) parseLogLine(lineBuf, logTracker, logCompletedCycles, logLifetimeActiveSeconds);
         lineLen = 0;
       } else if (lineLen < MAX_LINE - 1) {
         lineBuf[lineLen++] = c;
@@ -121,9 +137,13 @@ void BatteryStatsActivity::scanLog() {
   }
   if (lineLen > 0) {
     lineBuf[lineLen] = '\0';
-    parseLogLine(lineBuf, logTracker);
+    parseLogLine(lineBuf, logTracker, logCompletedCycles, logLifetimeActiveSeconds);
   }
   f.close();
+
+  // The still-open session (if any) hasn't completed a cycle yet, but its reading
+  // time so far is still part of the lifetime total.
+  logLifetimeActiveSeconds += logTracker.activeReadSeconds;
 }
 
 void BatteryStatsActivity::beginVerify() {
@@ -193,12 +213,20 @@ void BatteryStatsActivity::render(RenderLock&&) {
     renderer.drawText(UI_10_FONT_ID, leftX, y, tr(STR_FROM_LOG), true, EpdFontFamily::BOLD);
     y += LINE_H;
 
-    formatRate(value, sizeof(value), logTracker.wallClockDischargePctPerHour());
+    formatRate(value, sizeof(value), logTracker.avgDischargePctPerHour());
     drawStatRow(renderer, leftX, rightEdge, y, tr(STR_AVG_DISCHARGE_RATE), value);
     y += LINE_H;
 
-    formatDuration(value, sizeof(value), logTracker.wallClockElapsedSeconds());
-    drawStatRow(renderer, leftX, rightEdge, y, tr(STR_ELAPSED_SINCE_CHARGE), value);
+    formatDuration(value, sizeof(value), logTracker.totalReadSeconds());
+    drawStatRow(renderer, leftX, rightEdge, y, tr(STR_TOTAL_READ_TIME), value);
+    y += LINE_H;
+
+    snprintf(value, sizeof(value), "%u", logCompletedCycles);
+    drawStatRow(renderer, leftX, rightEdge, y, tr(STR_CHARGE_CYCLES_LOGGED), value);
+    y += LINE_H;
+
+    formatDuration(value, sizeof(value), logLifetimeActiveSeconds);
+    drawStatRow(renderer, leftX, rightEdge, y, tr(STR_LIFETIME_READ_TIME), value);
   }
 
   if (state != VERIFYING) {
