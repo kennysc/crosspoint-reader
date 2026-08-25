@@ -37,6 +37,7 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "images/LoadingIcon.h"
+#include "logger/BatterySessionTracker.h"
 #include "platform/UsbSerialJtagHandoff.h"
 #include "util/ButtonNavigator.h"
 #include "util/ScreenshotUtil.h"
@@ -265,6 +266,19 @@ void enterDeepSleep(bool fromTimeout = false) {
   // Every sleep mode leaves a complete retained frame on the e-ink panel. Keep
   // it visible until the first useful reader or home paint replaces it.
   APP_STATE.showBootScreen = false;
+
+  // Checkpoint active-reading time at sleep entry too, not just on the next page
+  // turn -- otherwise the tail end of a session (last page turn to going to sleep)
+  // would be silently dropped whenever no further page turn happens first.
+  Rtc::DateTime dt;
+  if (halClock.getDateTime(dt)) {
+    BatterySessionTracker tracker;
+    tracker.activeReadSeconds = APP_STATE.battActiveReadSeconds;
+    tracker.lastPageTurnEpoch = APP_STATE.battLastPageTurnEpoch;
+    tracker.observePageTurn(batteryEpochFromParts(dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second));
+    APP_STATE.battActiveReadSeconds = tracker.activeReadSeconds;
+    APP_STATE.battLastPageTurnEpoch = tracker.lastPageTurnEpoch;
+  }
 
   APP_STATE.saveToFile();
 
