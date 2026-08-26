@@ -62,6 +62,7 @@ void CrossPointState::toJson(JsonDocument& doc) const {
   doc["battHasSample"] = battHasSample;
   doc["battActiveReadSeconds"] = battActiveReadSeconds;
   doc["battLastPageTurnEpoch"] = battLastPageTurnEpoch;
+  doc["battActiveReadSecondsAtLastSample"] = battActiveReadSecondsAtLastSample;
 }
 
 bool CrossPointState::fromJson(JsonVariantConst doc) {
@@ -108,5 +109,6 @@ bool CrossPointState::fromJson(JsonVariantConst doc) {
   battHasSample = doc["battHasSample"] | false;
   battActiveReadSeconds = doc["battActiveReadSeconds"] | static_cast<uint32_t>(0);
   battLastPageTurnEpoch = doc["battLastPageTurnEpoch"] | static_cast<uint32_t>(0);
+  battActiveReadSecondsAtLastSample = doc["battActiveReadSecondsAtLastSample"] | static_cast<uint32_t>(0);
   return true;
 }

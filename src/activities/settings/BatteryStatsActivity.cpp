@@ -117,6 +117,7 @@ void BatteryStatsActivity::onEnter() {
   liveTracker.hasSample = APP_STATE.battHasSample;
   liveTracker.activeReadSeconds = APP_STATE.battActiveReadSeconds;
   liveTracker.lastPageTurnEpoch = APP_STATE.battLastPageTurnEpoch;
+  liveTracker.activeReadSecondsAtLastSample = APP_STATE.battActiveReadSecondsAtLastSample;
 
   requestUpdate();
 }
@@ -178,6 +179,13 @@ void BatteryStatsActivity::scanLog() {
   // still-open session's reading time so far, since that's part of the lifetime total.
   logCompletedActiveSeconds = logLifetimeActiveSeconds;
   logLifetimeActiveSeconds += logTracker.activeReadSeconds;
+
+  // The still-open session's tally above is only as fresh as the last %/charging-change
+  // CSV row, but liveTracker's Total Read Time updates on every page turn -- floor here
+  // so History never shows less than the current cycle it already includes.
+  if (liveTracker.totalReadSeconds() > logLifetimeActiveSeconds) {
+    logLifetimeActiveSeconds = liveTracker.totalReadSeconds();
+  }
 }
 
 void BatteryStatsActivity::loop() {

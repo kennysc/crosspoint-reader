@@ -254,8 +254,8 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t sleepTimeoutMinutes = 10;
   // Battery Stats: percentage at which "estimated time left" reaches zero.
   // Managed by BatteryStatsActivity, not by the generic SettingsList.
-  static constexpr uint8_t LOW_BATTERY_THRESHOLD_MIN = 1;
-  static constexpr uint8_t LOW_BATTERY_THRESHOLD_MAX = 50;
+  static constexpr uint8_t LOW_BATTERY_THRESHOLD_MIN = 0;
+  static constexpr uint8_t LOW_BATTERY_THRESHOLD_MAX = 99;
   uint8_t lowBatteryThresholdPercent = 10;
   // E-ink refresh frequency (default 15 pages)
   uint8_t refreshFrequency = REFRESH_15;

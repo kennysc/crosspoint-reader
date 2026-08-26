@@ -24,6 +24,12 @@ struct BatterySessionTracker {
   uint32_t activeReadSeconds = 0;
   uint32_t lastPageTurnEpoch = 0;
 
+  // Snapshot of activeReadSeconds taken only when an actual battery sample is
+  // observed (see observe()). Used as the rate/ETA denominator instead of the
+  // continuously-growing activeReadSeconds, so those figures don't drift just
+  // from reading pages between two real battery% samples.
+  uint32_t activeReadSecondsAtLastSample = 0;
+
   // Gaps between page turns longer than this indicate the device was idle or
   // asleep, not being actively read, so they're excluded from activeReadSeconds.
   static constexpr uint32_t MAX_ACTIVE_GAP_SECONDS = 600;
@@ -50,14 +56,18 @@ struct BatterySessionTracker {
     lastSamplePct = pct;
     lastCharging = charging;
     hasSample = true;
+    activeReadSecondsAtLastSample = activeReadSeconds;
   }
 
   // Active-reading seconds accumulated this discharge session. 0 if charging or no data yet.
   uint32_t totalReadSeconds() const { return lastCharging ? 0 : activeReadSeconds; }
 
-  // Average discharge rate in percent per active-reading hour. 0 if not enough data to estimate.
+  // Average discharge rate in percent per active-reading hour, as of the last observed
+  // battery sample. 0 if not enough data to estimate. Uses activeReadSecondsAtLastSample
+  // rather than totalReadSeconds() so the rate doesn't drift just from reading pages
+  // between two real battery% samples.
   float avgDischargePctPerHour() const {
-    const uint32_t seconds = totalReadSeconds();
+    const uint32_t seconds = lastCharging ? 0 : activeReadSecondsAtLastSample;
     if (seconds == 0 || sessionStartPct <= lastSamplePct) return 0.0f;
     const float hours = static_cast<float>(seconds) / 3600.0f;
     return static_cast<float>(sessionStartPct - lastSamplePct) / hours;

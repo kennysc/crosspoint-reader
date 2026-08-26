@@ -33,6 +33,7 @@ void ReadingLogger::logPageTurn() {
     tracker.hasSample = APP_STATE.battHasSample;
     tracker.activeReadSeconds = APP_STATE.battActiveReadSeconds;
     tracker.lastPageTurnEpoch = APP_STATE.battLastPageTurnEpoch;
+    tracker.activeReadSecondsAtLastSample = APP_STATE.battActiveReadSecondsAtLastSample;
 
     // Accumulate active-reading time on every page turn, not just when the battery
     // sample changes -- this is a pure in-RAM update (APP_STATE is memory-resident),
@@ -81,5 +82,6 @@ void ReadingLogger::logPageTurn() {
     APP_STATE.battHasSample = tracker.hasSample;
     APP_STATE.battActiveReadSeconds = tracker.activeReadSeconds;
     APP_STATE.battLastPageTurnEpoch = tracker.lastPageTurnEpoch;
+    APP_STATE.battActiveReadSecondsAtLastSample = tracker.activeReadSecondsAtLastSample;
     APP_STATE.saveToFile();
 }
