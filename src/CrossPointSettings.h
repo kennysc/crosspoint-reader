@@ -1,5 +1,6 @@
 #pragma once
 #include <ArduinoJson.h>
+#include <BatteryMonitor.h>
 #include <Epub/ReaderRenderSpec.h>
 #include <PersistableStore.h>
 
@@ -257,6 +258,27 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   static constexpr uint8_t LOW_BATTERY_THRESHOLD_MIN = 0;
   static constexpr uint8_t LOW_BATTERY_THRESHOLD_MAX = 99;
   uint8_t lowBatteryThresholdPercent = 10;
+
+  // Battery percentage source, for boards with an I2C fuel gauge (BatteryMonitor::
+  // hasGaugeBackend()). Gauge reads the chip's own SoC register; Voltage derives
+  // percentage from raw battery voltage against batteryCustomCurveMv instead, for
+  // boards where the gauge's SoC estimate has proven inaccurate. Meaningless (and
+  // ignored) on ADC-only boards, which always derive percentage from voltage.
+  // Managed by BatteryVoltageCalibrationActivity, not by the generic SettingsList.
+  enum class BatteryPercentMode : uint8_t { Gauge = 0, Voltage = 1 };
+  BatteryPercentMode batteryPercentMode = BatteryPercentMode::Gauge;
+  // User-calibrated voltage curve for BatteryPercentMode::Voltage, same shape as
+  // BatteryMonitor::DEFAULT_LIION_NOTCH_MV (index 0 = 0% ... index 10 = 100%).
+  // Seeded from the default curve; BatteryVoltageCalibrationActivity lets the user
+  // overwrite individual notches with a live-read mV value.
+  uint16_t batteryCustomCurveMv[11] = {
+      BatteryMonitor::DEFAULT_LIION_NOTCH_MV[0], BatteryMonitor::DEFAULT_LIION_NOTCH_MV[1],
+      BatteryMonitor::DEFAULT_LIION_NOTCH_MV[2], BatteryMonitor::DEFAULT_LIION_NOTCH_MV[3],
+      BatteryMonitor::DEFAULT_LIION_NOTCH_MV[4], BatteryMonitor::DEFAULT_LIION_NOTCH_MV[5],
+      BatteryMonitor::DEFAULT_LIION_NOTCH_MV[6], BatteryMonitor::DEFAULT_LIION_NOTCH_MV[7],
+      BatteryMonitor::DEFAULT_LIION_NOTCH_MV[8], BatteryMonitor::DEFAULT_LIION_NOTCH_MV[9],
+      BatteryMonitor::DEFAULT_LIION_NOTCH_MV[10],
+  };
   // E-ink refresh frequency (default 15 pages)
   uint8_t refreshFrequency = REFRESH_15;
   uint8_t hyphenationEnabled = 0;

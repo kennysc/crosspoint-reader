@@ -39,5 +39,6 @@ class BatteryStatsActivity final : public Activity {
 
   void goBack() { finish(); }
   void adjustThreshold(int delta);
+  void openVoltageCalibration();
   void scanLog();
 };

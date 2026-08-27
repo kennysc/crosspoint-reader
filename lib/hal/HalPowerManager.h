@@ -22,6 +22,13 @@ class HalPowerManager {
   mutable BatteryMonitor::Status _batteryStatusCached = {};
   mutable unsigned long _batteryStatusLastPollMs = 0;
 
+  // Gauge-board percentage source, pushed down from CrossPointSettings each loop
+  // (mirrors HalTiltSensor::update()'s SETTINGS-to-HAL push) so this HAL class
+  // stays independent of app-level settings headers. False/default curve until
+  // the first setBatteryPercentMode() call, matching BatteryPercentMode::Gauge.
+  bool _useVoltagePercentMode = false;
+  uint16_t _voltageCurveMv[11] = {};
+
   enum LockMode { None, NormalSpeed };
   LockMode currentLockMode = None;
   SemaphoreHandle_t modeMutex = nullptr;  // Protect access to currentLockMode
@@ -47,6 +54,17 @@ class HalPowerManager {
   // Get battery percentage (range 0-100)
   uint16_t getBatteryPercentage() const;
   BatteryMonitor::Status getBatteryStatus() const;
+
+  // True when the active board has an I2C fuel gauge backend. Callers use this
+  // to decide whether a gauge-vs-voltage percentage mode choice is meaningful
+  // (ADC-only boards always derive percentage from voltage already).
+  bool hasGaugeBackend() const;
+
+  // Push the gauge-board percentage source down from CrossPointSettings. Cheap
+  // (a bool and 11 uint16_t copies), safe to call every loop() tick alongside
+  // HalTiltSensor::update() -- see CrossPointSettings::batteryPercentMode /
+  // batteryCustomCurveMv for what these mean. No-op on boards without a gauge.
+  void setBatteryPercentMode(bool useVoltageMode, const uint16_t (&curveMv)[11]);
 
   // RAII helper class to manage power saving locks
   // Usage: create an instance of Lock in a scope to disable power saving, for example when running a task that needs

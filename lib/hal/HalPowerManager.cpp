@@ -7,6 +7,7 @@
 #include <esp_sleep.h>
 #include <soc/soc_caps.h>
 
+#include <algorithm>
 #include <cassert>
 
 #include "HalGPIO.h"
@@ -137,11 +138,22 @@ uint16_t HalPowerManager::getBatteryPercentage() const {
   static const BatteryMonitor battery;
   if (BoardConfig::ACTIVE.batteryGauge.gaugeAddr != 0) {
     const unsigned long now = millis();
-    if (_batteryLastPollMs != 0 && (now - _batteryLastPollMs) < BATTERY_POLL_MS) {
+    const bool firstPoll = _batteryLastPollMs == 0;
+    if (!firstPoll && (now - _batteryLastPollMs) < BATTERY_POLL_MS) {
+      return _batteryCachedPercent;
+    }
+    _batteryLastPollMs = now;
+
+    // Voltage mode: the gauge's own SoC register has proven inaccurate on some
+    // units, so derive percentage from its raw voltage register against a
+    // user-calibrated curve instead. See CrossPointSettings::batteryPercentMode.
+    if (_useVoltagePercentMode) {
+      const uint16_t mv = battery.readMillivolts();
+      const uint16_t previous = firstPoll ? 101 : static_cast<uint16_t>(_batteryCachedPercent);
+      _batteryCachedPercent = BatteryMonitor::percentageFromMillivolts(mv, _voltageCurveMv, previous);
       return _batteryCachedPercent;
     }
 
-    _batteryLastPollMs = now;
     uint16_t percent = 0;
     if (!battery.readPercentageChecked(percent)) {
       return _batteryCachedPercent;
@@ -166,8 +178,29 @@ BatteryMonitor::Status HalPowerManager::getBatteryStatus() const {
     return _batteryStatusCached;
   }
   _batteryStatusLastPollMs = now;
+  const uint16_t previousPercent = _batteryStatusCached.percentageKnown ? _batteryStatusCached.percentage : 101;
   _batteryStatusCached = battery.readStatus();
+
+  // Voltage mode: override the gauge's SoC-derived percentage with one computed
+  // from its raw voltage against the user-calibrated curve, matching
+  // getBatteryPercentage(). See CrossPointSettings::batteryPercentMode.
+  if (BoardConfig::ACTIVE.batteryGauge.gaugeAddr != 0 && _useVoltagePercentMode &&
+      _batteryStatusCached.millivoltsKnown) {
+    _batteryStatusCached.percentage =
+        BatteryMonitor::percentageFromMillivolts(_batteryStatusCached.millivolts, _voltageCurveMv, previousPercent);
+    _batteryStatusCached.percentageKnown = true;
+  }
   return _batteryStatusCached;
+}
+
+bool HalPowerManager::hasGaugeBackend() const {
+  static const BatteryMonitor battery;
+  return battery.hasGaugeBackend();
+}
+
+void HalPowerManager::setBatteryPercentMode(const bool useVoltageMode, const uint16_t (&curveMv)[11]) {
+  _useVoltagePercentMode = useVoltageMode;
+  std::copy(std::begin(curveMv), std::end(curveMv), std::begin(_voltageCurveMv));
 }
 
 HalPowerManager::Lock::Lock() {

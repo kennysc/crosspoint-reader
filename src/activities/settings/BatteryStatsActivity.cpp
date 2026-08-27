@@ -7,6 +7,7 @@
 
 #include <cstdio>
 
+#include "BatteryVoltageCalibrationActivity.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "MappedInputManager.h"
@@ -132,6 +133,15 @@ void BatteryStatsActivity::adjustThreshold(int delta) {
   requestUpdate();
 }
 
+void BatteryStatsActivity::openVoltageCalibration() {
+  if (!powerManager.hasGaugeBackend()) return;
+  startActivityForResult(std::make_unique<BatteryVoltageCalibrationActivity>(renderer, mappedInput),
+                         [this](const ActivityResult&) {
+                           SETTINGS.saveToFile();
+                           requestUpdate();
+                         });
+}
+
 void BatteryStatsActivity::scanLog() {
   logTracker = BatterySessionTracker();
   logCompletedCycles = 0;
@@ -209,6 +219,10 @@ void BatteryStatsActivity::loop() {
     adjustThreshold(1);
     return;
   }
+  if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+    openVoltageCalibration();
+    return;
+  }
 }
 
 void BatteryStatsActivity::render(RenderLock&&) {
@@ -274,7 +288,8 @@ void BatteryStatsActivity::render(RenderLock&&) {
   }
 
   if (state != LOADING) {
-    const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "-", "+");
+    const auto labels =
+        mappedInput.mapLabels(tr(STR_BACK), powerManager.hasGaugeBackend() ? tr(STR_CALIBRATE) : "", "-", "+");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   }
 

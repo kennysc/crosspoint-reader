@@ -107,6 +107,11 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
 
   // Battery Stats: managed by BatteryStatsActivity, not in SettingsList.
   doc["lowBatteryThresholdPercent"] = lowBatteryThresholdPercent;
+
+  // Battery voltage calibration: managed by BatteryVoltageCalibrationActivity, not in SettingsList.
+  doc["batteryPercentMode"] = static_cast<uint8_t>(batteryPercentMode);
+  JsonArray curve = doc["batteryCustomCurveMv"].to<JsonArray>();
+  for (const uint16_t mv : batteryCustomCurveMv) curve.add(mv);
 }
 
 bool CrossPointSettings::fromJson(JsonVariantConst doc) {
@@ -230,6 +235,30 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
   if (storedLowBatteryThreshold < LOW_BATTERY_THRESHOLD_MIN) storedLowBatteryThreshold = LOW_BATTERY_THRESHOLD_MIN;
   if (storedLowBatteryThreshold > LOW_BATTERY_THRESHOLD_MAX) storedLowBatteryThreshold = LOW_BATTERY_THRESHOLD_MAX;
   lowBatteryThresholdPercent = storedLowBatteryThreshold;
+
+  // Battery voltage calibration: managed by BatteryVoltageCalibrationActivity, not in SettingsList.
+  const uint8_t storedBatteryPercentMode = doc["batteryPercentMode"] | (uint8_t)BatteryPercentMode::Gauge;
+  batteryPercentMode =
+      storedBatteryPercentMode == (uint8_t)BatteryPercentMode::Voltage ? BatteryPercentMode::Voltage
+                                                                        : BatteryPercentMode::Gauge;
+  JsonVariantConst curveDoc = doc["batteryCustomCurveMv"];
+  bool curveValid = curveDoc.is<JsonArrayConst>() && curveDoc.as<JsonArrayConst>().size() == 11;
+  if (curveValid) {
+    size_t i = 0;
+    for (JsonVariantConst entry : curveDoc.as<JsonArrayConst>()) {
+      if (!entry.is<uint16_t>()) {
+        curveValid = false;
+        break;
+      }
+      batteryCustomCurveMv[i++] = entry.as<uint16_t>();
+    }
+  }
+  if (!curveValid) {
+    // Missing key (new/old settings file) or malformed array -- fall back to the
+    // default curve rather than leaving zeroed/garbage entries, which would make
+    // percentageFromMillivolts() degenerate.
+    for (size_t i = 0; i < 11; i++) batteryCustomCurveMv[i] = BatteryMonitor::DEFAULT_LIION_NOTCH_MV[i];
+  }
 
   if (needsResave) {
     LOG_DBG("CPS", "Resaving settings to update format");

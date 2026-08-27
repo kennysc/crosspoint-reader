@@ -448,6 +448,12 @@ void setup() {
   const bool restoreLightOn = SETTINGS.frontlightOn != 0 && (SETTINGS.frontlightRestoreOnWake != 0 || isSilentReboot);
   Frontlight.begin(SETTINGS.frontlightBrightness, SETTINGS.frontlightWarmth, restoreLightOn);
 
+  // Push once here (in addition to every loop() tick below) so the very first
+  // boot-screen battery read already reflects the saved mode, not the Gauge
+  // default HalPowerManager starts with.
+  powerManager.setBatteryPercentMode(SETTINGS.batteryPercentMode == CrossPointSettings::BatteryPercentMode::Voltage,
+                                      SETTINGS.batteryCustomCurveMv);
+
   switch (wakeupReason) {
     case HalGPIO::WakeupReason::PowerButton:
       wakePowerReleasePending = true;
@@ -605,6 +611,8 @@ void loop() {
   }
 
   halTiltSensor.update(SETTINGS.tiltPageTurn, SETTINGS.orientation, activityManager.isReaderActivity());
+  powerManager.setBatteryPercentMode(SETTINGS.batteryPercentMode == CrossPointSettings::BatteryPercentMode::Voltage,
+                                      SETTINGS.batteryCustomCurveMv);
 
   renderer.setFadingFix(SETTINGS.fadingFix);
 
