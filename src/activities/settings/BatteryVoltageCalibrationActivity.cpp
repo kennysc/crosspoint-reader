@@ -4,6 +4,7 @@
 #include <HalPowerManager.h>
 #include <I18n.h>
 
+#include <algorithm>
 #include <cstdio>
 
 #include "CrossPointSettings.h"
@@ -48,7 +49,48 @@ void BatteryVoltageCalibrationActivity::moveSelection(const int index) {
   requestUpdate();
 }
 
+void BatteryVoltageCalibrationActivity::enterAdjustMode() {
+  editingMv = SETTINGS.batteryCustomCurveMv[nav.selected];
+  mode = CalibrationMode::Adjust;
+  requestUpdate();
+}
+
+void BatteryVoltageCalibrationActivity::adjustEditingMv(const int delta) {
+  const int raw = static_cast<int>(editingMv) + delta;
+  editingMv = static_cast<uint16_t>(std::clamp(raw, static_cast<int>(MV_MIN), static_cast<int>(MV_MAX)));
+  requestUpdate();
+}
+
+void BatteryVoltageCalibrationActivity::applyAdjust() {
+  SETTINGS.batteryCustomCurveMv[nav.selected] = editingMv;
+  mode = CalibrationMode::Normal;
+  requestUpdate();
+}
+
+void BatteryVoltageCalibrationActivity::cancelAdjust() {
+  mode = CalibrationMode::Normal;  // editingMv discarded; SETTINGS untouched
+  requestUpdate();
+}
+
 void BatteryVoltageCalibrationActivity::loop() {
+  if (mode == CalibrationMode::Adjust) {
+    if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+      cancelAdjust();
+      return;
+    }
+    if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+      applyAdjust();
+      return;
+    }
+    // Hold-to-repeat, driven every tick -- same idiom as
+    // EpubReaderPercentSelectionActivity's fine-step buttons.
+    buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Up},
+                                         [this] { adjustEditingMv(currentStepMv()); });
+    buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Down},
+                                         [this] { adjustEditingMv(-static_cast<int>(currentStepMv())); });
+    return;
+  }
+
   if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
     finish();
     return;
@@ -61,21 +103,20 @@ void BatteryVoltageCalibrationActivity::loop() {
     if (nav.selected < NOTCH_COUNT - 1) moveSelection(nav.selected + 1);
     return;
   }
-  // Left/Right pick the source directly (Gauge / Voltage) rather than toggling,
-  // matching the button-hint labels shown for each side.
   if (mappedInput.wasPressed(MappedInputManager::Button::Left)) {
-    SETTINGS.batteryPercentMode = CrossPointSettings::BatteryPercentMode::Gauge;
+    SETTINGS.batteryPercentMode = SETTINGS.batteryPercentMode == CrossPointSettings::BatteryPercentMode::Gauge
+                                       ? CrossPointSettings::BatteryPercentMode::Voltage
+                                       : CrossPointSettings::BatteryPercentMode::Gauge;
     requestUpdate();
     return;
   }
   if (mappedInput.wasPressed(MappedInputManager::Button::Right)) {
-    SETTINGS.batteryPercentMode = CrossPointSettings::BatteryPercentMode::Voltage;
+    coarseStep = !coarseStep;
     requestUpdate();
     return;
   }
   if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
-    SETTINGS.batteryCustomCurveMv[nav.selected] = liveMv;
-    requestUpdate();
+    enterAdjustMode();
     return;
   }
 
@@ -113,15 +154,27 @@ void BatteryVoltageCalibrationActivity::render(RenderLock&&) {
   const uint16_t previewPct = BatteryMonitor::percentageFromMillivolts(liveMv, SETTINGS.batteryCustomCurveMv);
   snprintf(value, sizeof(value), "%u mV (~%u%%)", liveMv, previewPct);
   drawStatRow(renderer, leftX, rightEdge, y, tr(STR_CURRENT_READING), value);
+  y += LINE_H;
+
+  char stepValue[16];
+  snprintf(stepValue, sizeof(stepValue), "%u mV", currentStepMv());
+  drawStatRow(renderer, leftX, rightEdge, y, tr(STR_STEP), stepValue);
 
   renderUi();
 
   GUI.drawHelpText(
       renderer, Rect{0, pageHeight - metrics.buttonHintsHeight - metrics.contentSidePadding - 15, pageWidth, 20},
-      tr(STR_BATTERY_CALIBRATION_HINT));
+      mode == CalibrationMode::Adjust ? tr(STR_BATTERY_CALIBRATION_ADJUST_HINT) : tr(STR_BATTERY_CALIBRATION_HINT));
 
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_ASSIGN), tr(STR_BATTERY_SOURCE_GAUGE),
-                                            tr(STR_BATTERY_SOURCE_VOLTAGE));
+  MappedInputManager::Labels labels;
+  if (mode == CalibrationMode::Adjust) {
+    labels = mappedInput.mapLabels(tr(STR_CANCEL), tr(STR_APPLY), "", "");
+  } else {
+    const bool voltageMode = SETTINGS.batteryPercentMode == CrossPointSettings::BatteryPercentMode::Voltage;
+    labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_EDIT),
+                                   voltageMode ? tr(STR_BATTERY_SOURCE_GAUGE) : tr(STR_BATTERY_SOURCE_VOLTAGE),
+                                   tr(STR_TOGGLE));
+  }
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   renderer.displayBuffer();
 }
@@ -135,15 +188,19 @@ void BatteryVoltageCalibrationActivity::buildScreen(UiScreen& screen) {
   const auto pageHeight = renderer.getScreenHeight();
 
   // Mirrors the stat-row geometry in render() -- the list starts right below
-  // the two rows drawn there.
+  // the three rows drawn there.
   constexpr int LINE_H = 28;
-  const int listTop = metrics.topPadding + metrics.headerHeight + 30 + LINE_H + LINE_H + 10;
+  const int listTop = metrics.topPadding + metrics.headerHeight + 30 + LINE_H + LINE_H + LINE_H + 10;
   const int listBottom = pageHeight - metrics.buttonHintsHeight - metrics.verticalSpacing - 30;
   screen.setContentMargin(fui::Insets{static_cast<int16_t>(listTop), 0,
                                       static_cast<int16_t>(pageHeight - listBottom), 0});
 
   for (uint8_t i = 0; i < NOTCH_COUNT; ++i) {
-    snprintf(notchValues[i], sizeof(notchValues[i]), "%u mV", SETTINGS.batteryCustomCurveMv[i]);
+    if (mode == CalibrationMode::Adjust && i == nav.selected) {
+      snprintf(notchValues[i], sizeof(notchValues[i]), "> %u mV <", editingMv);
+    } else {
+      snprintf(notchValues[i], sizeof(notchValues[i]), "%u mV", SETTINGS.batteryCustomCurveMv[i]);
+    }
     rowItems[i].label = notchLabels[i];
     rowItems[i].value = notchValues[i];
   }

@@ -29,6 +29,23 @@ class HalPowerManager {
   bool _useVoltagePercentMode = false;
   uint16_t _voltageCurveMv[11] = {};
 
+  // Shared debounce state for Voltage-mode percentage, used by both
+  // getBatteryPercentage() and getBatteryStatus() (same physical percentage --
+  // one shared state, not duplicated per call site). 101 = no history yet.
+  mutable uint16_t _voltageDisplayPercent = 101;
+  mutable unsigned long _voltagePendingSinceMs = 0;  // 0 = no pending change
+  mutable bool _voltagePendingIsIncrease = false;
+  static constexpr unsigned long VOLTAGE_PERCENT_CHANGE_DEBOUNCE_MS = 2UL * 60UL * 1000UL;  // 2 min
+
+  // Computes a 1%-resolution Voltage-mode percentage via linear interpolation
+  // between the two bracketing _voltageCurveMv[] notches, then debounces it:
+  // a change (either direction) must hold continuously for
+  // VOLTAGE_PERCENT_CHANGE_DEBOUNCE_MS before it is shown, so a load-transient
+  // voltage sag/blip doesn't visibly move the percentage. Shared by
+  // getBatteryPercentage() and getBatteryStatus() -- both derive from the same
+  // physical voltage.
+  uint16_t computeVoltagePercent(uint16_t mv) const;
+
   enum LockMode { None, NormalSpeed };
   LockMode currentLockMode = None;
   SemaphoreHandle_t modeMutex = nullptr;  // Protect access to currentLockMode

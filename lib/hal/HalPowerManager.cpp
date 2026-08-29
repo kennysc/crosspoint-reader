@@ -149,8 +149,7 @@ uint16_t HalPowerManager::getBatteryPercentage() const {
     // user-calibrated curve instead. See CrossPointSettings::batteryPercentMode.
     if (_useVoltagePercentMode) {
       const uint16_t mv = battery.readMillivolts();
-      const uint16_t previous = firstPoll ? 101 : static_cast<uint16_t>(_batteryCachedPercent);
-      _batteryCachedPercent = BatteryMonitor::percentageFromMillivolts(mv, _voltageCurveMv, previous);
+      _batteryCachedPercent = computeVoltagePercent(mv);
       return _batteryCachedPercent;
     }
 
@@ -178,7 +177,6 @@ BatteryMonitor::Status HalPowerManager::getBatteryStatus() const {
     return _batteryStatusCached;
   }
   _batteryStatusLastPollMs = now;
-  const uint16_t previousPercent = _batteryStatusCached.percentageKnown ? _batteryStatusCached.percentage : 101;
   _batteryStatusCached = battery.readStatus();
 
   // Voltage mode: override the gauge's SoC-derived percentage with one computed
@@ -186,11 +184,59 @@ BatteryMonitor::Status HalPowerManager::getBatteryStatus() const {
   // getBatteryPercentage(). See CrossPointSettings::batteryPercentMode.
   if (BoardConfig::ACTIVE.batteryGauge.gaugeAddr != 0 && _useVoltagePercentMode &&
       _batteryStatusCached.millivoltsKnown) {
-    _batteryStatusCached.percentage =
-        BatteryMonitor::percentageFromMillivolts(_batteryStatusCached.millivolts, _voltageCurveMv, previousPercent);
+    _batteryStatusCached.percentage = computeVoltagePercent(_batteryStatusCached.millivolts);
     _batteryStatusCached.percentageKnown = true;
   }
   return _batteryStatusCached;
+}
+
+uint16_t HalPowerManager::computeVoltagePercent(const uint16_t mv) const {
+  // 1) Raw 1%-resolution value via linear interpolation between the bracketing
+  // curve notches.
+  uint16_t raw;
+  if (mv >= _voltageCurveMv[10]) {
+    raw = 100;
+  } else if (mv <= _voltageCurveMv[0]) {
+    raw = 0;
+  } else {
+    uint8_t i = 1;
+    while (i < 10 && mv >= _voltageCurveMv[i]) ++i;
+    const uint16_t lo = _voltageCurveMv[i - 1];
+    const uint16_t hi = _voltageCurveMv[i];
+    if (hi <= lo) {
+      // Non-ascending/degenerate segment (e.g. mid-edit in the calibration
+      // screen): fall back to the floor notch rather than dividing.
+      raw = static_cast<uint16_t>((i - 1) * 10);
+    } else {
+      const uint32_t span = hi - lo;
+      const uint32_t offset = mv - lo;
+      raw = static_cast<uint16_t>((i - 1) * 10 + (offset * 10) / span);
+    }
+  }
+
+  // 2) Debounce: a change (either direction) must hold continuously for
+  // VOLTAGE_PERCENT_CHANGE_DEBOUNCE_MS before it is shown. Any tick where raw
+  // returns to the currently displayed value, or reverses direction, clears
+  // the pending timer.
+  const unsigned long now = millis();
+  if (_voltageDisplayPercent > 100) {
+    _voltageDisplayPercent = raw;
+    _voltagePendingSinceMs = 0;
+    return _voltageDisplayPercent;
+  }
+  if (raw == _voltageDisplayPercent) {
+    _voltagePendingSinceMs = 0;
+    return _voltageDisplayPercent;
+  }
+  const bool pendingIncrease = raw > _voltageDisplayPercent;
+  if (_voltagePendingSinceMs == 0 || pendingIncrease != _voltagePendingIsIncrease) {
+    _voltagePendingSinceMs = now;
+    _voltagePendingIsIncrease = pendingIncrease;
+  } else if (now - _voltagePendingSinceMs >= VOLTAGE_PERCENT_CHANGE_DEBOUNCE_MS) {
+    _voltageDisplayPercent = raw;
+    _voltagePendingSinceMs = now;  // restart in case the trend keeps going
+  }
+  return _voltageDisplayPercent;
 }
 
 bool HalPowerManager::hasGaugeBackend() const {
@@ -199,8 +245,17 @@ bool HalPowerManager::hasGaugeBackend() const {
 }
 
 void HalPowerManager::setBatteryPercentMode(const bool useVoltageMode, const uint16_t (&curveMv)[11]) {
+  const bool modeChanged = useVoltageMode != _useVoltagePercentMode;
+  const bool curveChanged = !std::equal(std::begin(curveMv), std::end(curveMv), std::begin(_voltageCurveMv));
   _useVoltagePercentMode = useVoltageMode;
   std::copy(std::begin(curveMv), std::end(curveMv), std::begin(_voltageCurveMv));
+  if (modeChanged || curveChanged) {
+    // Curve/mode actually changed (mid-edit in the calibration screen, or a
+    // Gauge/Voltage flip) -- drop the debounce baseline computed under the
+    // old curve so the next read isn't held back by it.
+    _voltageDisplayPercent = 101;
+    _voltagePendingSinceMs = 0;
+  }
 }
 
 HalPowerManager::Lock::Lock() {
