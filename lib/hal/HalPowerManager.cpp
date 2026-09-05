@@ -10,7 +10,9 @@
 #include <algorithm>
 #include <cassert>
 
+#include "HalClock.h"
 #include "HalGPIO.h"
+#include "HalStorage.h"
 
 #if FREEINK_DEVICE_PAPERMONO
 #include <M5Pm1.h>
@@ -256,6 +258,56 @@ void HalPowerManager::setBatteryPercentMode(const bool useVoltageMode, const uin
     _voltageDisplayPercent = 101;
     _voltagePendingSinceMs = 0;
   }
+}
+
+void HalPowerManager::dumpBq27220DiagnosticsToSd(const bool deviceIsX3) const {
+  if (!deviceIsX3) {
+    return;
+  }
+
+  // Bring the gauge I2C bus up through the existing HAL surface -- the result is
+  // unused here, this call's only purpose is BatteryMonitor::ensureWire()'s side
+  // effect inside the freeink-sdk submodule.
+  (void)getBatteryStatus();
+
+  X3GPIO::Bq27220Diagnostics diag;
+  X3GPIO::readBQ27220Diagnostics(diag);
+
+  X3GPIO::Bq27220IdentityDiagnostics identity;
+  X3GPIO::readBQ27220IdentityDiagnostics(identity);
+
+  Rtc::DateTime dt;
+  const bool haveTime = halClock.isAvailable() && halClock.getDateTime(dt);
+
+  Storage.mkdir("/.crosspoint");
+  HalFile file;
+  if (!Storage.openFileForWrite("PWR", "/.crosspoint/bq27220_dump.txt", file)) {
+    LOG_ERR("PWR", "Failed to open bq27220_dump.txt for writing");
+    return;
+  }
+
+  if (haveTime) {
+    file.printf("Timestamp: %04u-%02u-%02u %02u:%02u:%02u\n", dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second);
+  }
+  file.printf("Voltage_mV: %ld\n", static_cast<long>(diag.voltageMv));
+  file.printf("StateOfCharge_pct: %ld\n", static_cast<long>(diag.socPercent));
+  file.printf("FullChargeCapacity_mAh: %ld\n", static_cast<long>(diag.fullChargeCapacityMah));
+  file.printf("RemainingCapacity_mAh: %ld\n", static_cast<long>(diag.remainingCapacityMah));
+  file.printf("DesignCapacity_mAh: %ld\n", static_cast<long>(diag.designCapacityMah));
+  if (diag.operationStatusRaw >= 0) {
+    file.printf("OperationStatus_raw: 0x%04X\n", static_cast<unsigned>(diag.operationStatusRaw));
+  } else {
+    file.printf("OperationStatus_raw: -1\n");
+  }
+  // Independent of the Data Memory access issue -- see BQ27220_CTRL_DEVICE_NUMBER
+  // comment in HalGPIO.h. Expect 0x0220 on a genuine BQ27220.
+  if (identity.deviceNumberReadOk) {
+    file.printf("DeviceNumber_raw: 0x%04X\n", static_cast<unsigned>(identity.deviceNumberRaw));
+  } else {
+    file.printf("DeviceNumber_raw: -1\n");
+  }
+
+  LOG_INF("PWR", "Wrote BQ27220 diagnostic dump to SD");
 }
 
 HalPowerManager::Lock::Lock() {

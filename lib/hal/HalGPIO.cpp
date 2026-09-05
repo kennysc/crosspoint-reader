@@ -40,6 +40,56 @@ bool readBQ27220CurrentMA(int16_t* outCurrent) {
   return true;
 }
 
+namespace {
+// Reads one register into an int32_t field, leaving it at -1 (the caller's
+// pre-set default) on I2C failure.
+void readDiagField(uint8_t reg, int32_t& outField) {
+  uint16_t raw = 0;
+  if (readI2CReg16LE(I2C_ADDR_BQ27220, reg, &raw)) {
+    outField = raw;
+  }
+}
+}  // namespace
+
+void readBQ27220Diagnostics(Bq27220Diagnostics& out) {
+  readDiagField(BQ27220_VOLT_REG, out.voltageMv);
+  readDiagField(BQ27220_SOC_REG, out.socPercent);
+  readDiagField(BQ27220_FULL_CHARGE_CAP_REG, out.fullChargeCapacityMah);
+  readDiagField(BQ27220_REMAINING_CAP_REG, out.remainingCapacityMah);
+  readDiagField(BQ27220_DESIGN_CAP_REG, out.designCapacityMah);
+  readDiagField(BQ27220_OP_STATUS_REG, out.operationStatusRaw);
+}
+
+namespace {
+// Writes a 16-bit subcommand to Control() (0x00/0x01) as two separate
+// single-byte transactions -- this device does not reliably auto-increment
+// across a combined multi-byte register write.
+bool writeControlSubcommand(uint16_t subcommand) {
+  Wire.beginTransmission(I2C_ADDR_BQ27220);
+  Wire.write(static_cast<uint8_t>(0x00));
+  Wire.write(static_cast<uint8_t>(subcommand & 0xFF));
+  if (Wire.endTransmission(true) != 0) {
+    return false;
+  }
+  Wire.beginTransmission(I2C_ADDR_BQ27220);
+  Wire.write(static_cast<uint8_t>(0x01));
+  Wire.write(static_cast<uint8_t>((subcommand >> 8) & 0xFF));
+  return Wire.endTransmission(true) == 0;
+}
+}  // namespace
+
+void readBQ27220IdentityDiagnostics(Bq27220IdentityDiagnostics& out) {
+  if (!writeControlSubcommand(BQ27220_CTRL_DEVICE_NUMBER)) {
+    return;
+  }
+  delay(2);
+  uint16_t deviceNumber = 0;
+  out.deviceNumberReadOk = readI2CReg16LE(I2C_ADDR_BQ27220, BQ27220_MACDATA_REG, &deviceNumber);
+  if (out.deviceNumberReadOk) {
+    out.deviceNumberRaw = deviceNumber;
+  }
+}
+
 }  // namespace X3GPIO
 
 namespace {

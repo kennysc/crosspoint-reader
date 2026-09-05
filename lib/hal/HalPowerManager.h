@@ -83,6 +83,11 @@ class HalPowerManager {
   // batteryCustomCurveMv for what these mean. No-op on boards without a gauge.
   void setBatteryPercentMode(bool useVoltageMode, const uint16_t (&curveMv)[11]);
 
+  // Dumps BQ27220 diagnostic registers to /.crosspoint/bq27220_dump.txt. No-op
+  // when deviceIsX3 is false. Call once at boot, after Storage.begin() has
+  // succeeded (the gauge I2C bus and the SD card are not ready any earlier).
+  void dumpBq27220DiagnosticsToSd(bool deviceIsX3) const;
+
   // RAII helper class to manage power saving locks
   // Usage: create an instance of Lock in a scope to disable power saving, for example when running a task that needs
   // full performance. When the Lock instance is destroyed (goes out of scope), power saving will be re-enabled.

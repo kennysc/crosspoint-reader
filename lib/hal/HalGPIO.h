@@ -22,11 +22,32 @@
 #define X3_I2C_SCL 0
 #define X3_I2C_FREQ 400000
 
-// TI BQ27220 Fuel gauge I2C
-#define I2C_ADDR_BQ27220 0x55  // Fuel gauge I2C address
-#define BQ27220_SOC_REG 0x2C   // StateOfCharge() command code (%)
-#define BQ27220_CUR_REG 0x0C   // Current() command code (signed mA)
-#define BQ27220_VOLT_REG 0x08  // Voltage() command code (mV)
+// TI BQ27220 Fuel gauge I2C. Addresses verified against the TI BQ27220
+// Technical Reference Manual (SLUUBD4A) Standard Commands table.
+#define I2C_ADDR_BQ27220 0x55            // Fuel gauge I2C address
+#define BQ27220_SOC_REG 0x2C             // StateOfCharge() command code (%)
+#define BQ27220_CUR_REG 0x0C             // Current() command code (signed mA)
+#define BQ27220_VOLT_REG 0x08            // Voltage() command code (mV)
+#define BQ27220_REMAINING_CAP_REG 0x10   // RemainingCapacity() command code (mAh)
+#define BQ27220_FULL_CHARGE_CAP_REG 0x12 // FullChargeCapacity() command code (mAh)
+#define BQ27220_DESIGN_CAP_REG 0x3C      // DesignCapacity() command code (mAh, read-only)
+// OperationStatus() command code (flags), per TRM Table 2-7:
+// High byte: [2]=CFGUPDATE (gauge is in CONFIG_UPDATE mode, gauging suspended), rest RSVD.
+// Low byte: [7]=BTPINT [6]=SMTH [5]=INITCOMP [4]=VDQ [3]=EDV2 [2:1]=SEC[1:0] [0]=CALMD.
+// SEC[1:0] is the seal state: 11=Sealed, 10=Unsealed, 01=Full Access.
+#define BQ27220_OP_STATUS_REG 0x3A
+
+// Control() (0x00/0x01) subcommand identity check -- independent of the
+// still-unresolved Data Memory (BlockData) access issue, since this only
+// uses Control() writes and MACData() reads, both already proven to work
+// correctly (the CONFIG_UPDATE mode bit was observed to flip and clear via
+// this exact write mechanism). Per TRM SLUUBD4A Section 2.2, "Any
+// subcommand that has a data response will be read back on MACData()"
+// (0x40/0x41 for a 2-byte response). DEVICE_NUMBER() must echo 0x0220 on a
+// genuine BQ27220 (Section 2.2.2); a mismatch here would mean the whole
+// MACData() response mechanism is suspect, not just Data Memory addressing.
+#define BQ27220_CTRL_DEVICE_NUMBER 0x0001
+#define BQ27220_MACDATA_REG 0x40
 
 // Analog DS3231 RTC I2C
 #define I2C_ADDR_DS3231 0x68  // RTC I2C address
@@ -37,6 +58,37 @@
 #define I2C_ADDR_QMI8658_ALT 0x6A    // IMU I2C fallback address
 #define QMI8658_WHO_AM_I_REG 0x00    // WHO_AM_I command code
 #define QMI8658_WHO_AM_I_VALUE 0x05  // WHO_AM_I expected value
+
+namespace X3GPIO {
+
+// Snapshot of the BQ27220 diagnostic registers for the SD dump. -1 marks a
+// register whose I2C read failed; every real value is non-negative (all are
+// unsigned 16-bit standard commands per the TRM), so -1 is an unambiguous
+// failure sentinel.
+struct Bq27220Diagnostics {
+  int32_t voltageMv = -1;
+  int32_t socPercent = -1;
+  int32_t fullChargeCapacityMah = -1;
+  int32_t remainingCapacityMah = -1;
+  int32_t designCapacityMah = -1;
+  int32_t operationStatusRaw = -1;  // raw flags word; see BQ27220_OP_STATUS_REG comment for bit layout
+};
+
+// Reads all six diagnostic registers. Caller must ensure the gauge I2C bus is
+// already up (e.g. via a prior HalPowerManager battery read) before calling.
+void readBQ27220Diagnostics(Bq27220Diagnostics& out);
+
+// See BQ27220_CTRL_DEVICE_NUMBER comment above.
+struct Bq27220IdentityDiagnostics {
+  bool deviceNumberReadOk = false;
+  int32_t deviceNumberRaw = -1;  // expect 0x0220 on a genuine BQ27220 (TRM Section 2.2.2)
+};
+
+// Reads DEVICE_NUMBER() via Control()/MACData(). Caller must ensure the
+// gauge I2C bus is already up.
+void readBQ27220IdentityDiagnostics(Bq27220IdentityDiagnostics& out);
+
+}  // namespace X3GPIO
 
 class HalGPIO {
 #if CROSSPOINT_EMULATED == 0

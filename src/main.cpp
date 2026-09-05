@@ -417,6 +417,7 @@ void setup() {
   }
 
   HalSystem::checkPanic();
+  powerManager.dumpBq27220DiagnosticsToSd(gpio.deviceIsX3());
 
   APP_STATE.loadFromFile();
   const bool isSleepWake = wakeupReason == HalGPIO::WakeupReason::PowerButton;
