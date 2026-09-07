@@ -13,6 +13,7 @@
 #include "HalClock.h"
 #include "HalGPIO.h"
 #include "HalStorage.h"
+#include <Memory.h>
 
 #if FREEINK_DEVICE_PAPERMONO
 #include <M5Pm1.h>
@@ -307,7 +308,483 @@ void HalPowerManager::dumpBq27220DiagnosticsToSd(const bool deviceIsX3) const {
     file.printf("DeviceNumber_raw: -1\n");
   }
 
+  // Raw hex dump of the full command address space (see BQ27220_RAW_DUMP_LEN
+  // comment in HalGPIO.h) for offline decoding: the named fields above only
+  // cover the registers this codebase already knows about, and won't show
+  // where a clone chip's actual layout diverges from the TRM.
+  auto rawRegs = makeUniqueNoThrow<uint8_t[]>(X3GPIO::BQ27220_RAW_DUMP_LEN);
+  if (rawRegs) {
+    X3GPIO::readBQ27220RawRegisters(rawRegs.get(), X3GPIO::BQ27220_RAW_DUMP_LEN);
+    file.printf("\nRaw register dump (addr 0x00-0x%02X, 0xFF marks a failed I2C read):\n",
+                X3GPIO::BQ27220_RAW_DUMP_LEN - 1);
+    for (uint8_t row = 0; row < X3GPIO::BQ27220_RAW_DUMP_LEN; row += 16) {
+      file.printf("%02X:", row);
+      for (uint8_t col = 0; col < 16; col++) {
+        file.printf(" %02X", rawRegs[row + col]);
+      }
+      file.printf("\n");
+    }
+  } else {
+    LOG_ERR("PWR", "OOM: %d bytes for BQ27220 raw dump buffer", X3GPIO::BQ27220_RAW_DUMP_LEN);
+  }
+
   LOG_INF("PWR", "Wrote BQ27220 diagnostic dump to SD");
+}
+
+namespace {
+// Polls OperationStatus() until CFGUPDATE reaches `wantSet`, or ~1s elapses
+// (TRM S2.2.21/S6.1 steps 4 and 15).
+bool waitForBq27220CfgUpdate(const bool wantSet) {
+  const unsigned long deadline = millis() + 1000;
+  do {
+    uint16_t status = 0;
+    if (X3GPIO::readBQ27220OperationStatus(&status)) {
+      if (((status & BQ27220_OP_STATUS_CFGUPDATE_MASK) != 0) == wantSet) {
+        return true;
+      }
+    }
+    delay(20);
+  } while (millis() < deadline);
+  return false;
+}
+}  // namespace
+
+void HalPowerManager::reprogramBq27220Capacity(const bool deviceIsX3, const uint16_t designCapacityMah,
+                                                const uint16_t fullChargeCapacityMah) const {
+  if (!deviceIsX3) {
+    return;
+  }
+
+  (void)getBatteryStatus();  // bring up the gauge I2C bus, see dumpBq27220DiagnosticsToSd
+
+  // Mirrors every step to /.crosspoint/bq27220_reprogram_log.txt in addition to
+  // LOG_INF/LOG_ERR, since this device may not have a serial connection --
+  // the SD card is the only way to see which step failed if one does.
+  Storage.mkdir("/.crosspoint");
+  HalFile logFile;
+  const bool haveLogFile = Storage.openFileForWrite("PWR", "/.crosspoint/bq27220_reprogram_log.txt", logFile);
+  if (!haveLogFile) {
+    LOG_ERR("PWR", "BQ27220 reprogram: failed to open reprogram log file (continuing without it)");
+  }
+  auto logStep = [&](const char* message) {
+    LOG_INF("PWR", "%s", message);
+    if (haveLogFile) {
+      logFile.printf("%s\n", message);
+    }
+  };
+
+  // Sized to hold "Write FullChargeCapacity/DesignCapacity: " plus the
+  // longest writeBQ27220DataMemoryField() failDetail message below.
+  char msg[192];
+  snprintf(msg, sizeof(msg), "Target: DesignCapacity=%u FullChargeCapacity=%u mAh", designCapacityMah,
+           fullChargeCapacityMah);
+  logStep(msg);
+
+  // UNSEALED (this gauge's power-on default, see docs/bq27220-x3-fuel-gauge-findings.md
+  // Finding 3) does not permit Data Memory writes -- unseal to FULL ACCESS first.
+  const bool unsealed = X3GPIO::writeBQ27220Control(BQ27220_CTRL_FULL_ACCESS_KEY) &&
+                         X3GPIO::writeBQ27220Control(BQ27220_CTRL_FULL_ACCESS_KEY);
+  logStep(unsealed ? "FULL ACCESS unseal: ok" : "FULL ACCESS unseal: FAILED");
+  if (!unsealed) {
+    return;
+  }
+  delay(10);
+
+  // "ok" above only means the key writes ACKed at the I2C bus level -- it
+  // does NOT confirm the gauge actually elevated permission. Every dump
+  // collected so far has shown SEC[1:0]=10 (Unsealed), never 01 (Full
+  // Access), even right after this exact unseal sequence. TRM S6.1 step 2
+  // requires Full Access for Data Memory writes, so if this key exchange
+  // isn't actually working, every write attempt below is doomed regardless
+  // of checksum/length/timing correctness. Verify directly instead of
+  // assuming.
+  uint16_t opStatusAfterUnseal = 0;
+  if (X3GPIO::readBQ27220OperationStatus(&opStatusAfterUnseal)) {
+    const uint8_t sec = (opStatusAfterUnseal >> 1) & 0x3;
+    const char* secName;
+    if (sec == 0b01) {
+      secName = "Full Access";
+    } else if (sec == 0b10) {
+      secName = "Unsealed (NOT Full Access)";
+    } else if (sec == 0b11) {
+      secName = "Sealed";
+    } else {
+      secName = "unknown(00)";
+    }
+    snprintf(msg, sizeof(msg), "Post-unseal OperationStatus SEC[1:0]=%u%u -> %s", (sec >> 1) & 1, sec & 1, secName);
+    logStep(msg);
+  } else {
+    logStep("Post-unseal OperationStatus read failed -- could not verify SEC state");
+  }
+
+  // Observed intermittently flaky in practice (this exact write succeeds on
+  // some boots, silently doesn't take on others) -- retry a few times with a
+  // short backoff rather than treating one miss as a hard failure.
+  constexpr uint8_t kMaxCfgUpdateAttempts = 3;
+  bool enteredCfgUpdate = false;
+  for (uint8_t attempt = 1; attempt <= kMaxCfgUpdateAttempts && !enteredCfgUpdate; attempt++) {
+    if (!X3GPIO::writeBQ27220Control(BQ27220_CTRL_ENTER_CFG_UPDATE)) {
+      snprintf(msg, sizeof(msg), "ENTER_CFG_UPDATE attempt %u: I2C write failed", attempt);
+      logStep(msg);
+      delay(50);
+      continue;
+    }
+    enteredCfgUpdate = waitForBq27220CfgUpdate(true);
+    if (!enteredCfgUpdate) {
+      snprintf(msg, sizeof(msg), "ENTER_CFG_UPDATE attempt %u: write ok, CFGUPDATE bit never set within 1s", attempt);
+      logStep(msg);
+      delay(50);
+    }
+  }
+  logStep(enteredCfgUpdate ? "ENTER_CFG_UPDATE: ok" : "ENTER_CFG_UPDATE: FAILED after retries");
+  if (!enteredCfgUpdate) {
+    return;
+  }
+
+  // 0 means "skip this field" -- lets a build attempt just the single-block
+  // FullChargeCapacity write (no boundary crossing) before risking the
+  // two-block DesignCapacity write. A failure's diagnostic detail (full
+  // before/after block hex, not just the mismatched offsets) can run past
+  // 300 bytes, so it's heap-allocated per the project's <256B stack-local
+  // rule, with a smaller stack fallback if that allocation fails.
+  auto writeField = [&](uint16_t address, uint16_t valueMah, const char* fieldName) -> bool {
+    constexpr size_t kDetailBufSize = 512;
+    auto heapDetail = makeUniqueNoThrow<char[]>(kDetailBufSize);
+    char smallFallback[128] = "";
+    char* detailBuf = heapDetail ? heapDetail.get() : smallFallback;
+    const size_t detailBufLen = heapDetail ? kDetailBufSize : sizeof(smallFallback);
+    if (!heapDetail) {
+      LOG_ERR("PWR", "OOM: %u bytes for BQ27220 write diagnostic buffer, using smaller fallback",
+              static_cast<unsigned>(kDetailBufSize));
+    }
+    detailBuf[0] = '\0';
+    // verboseDiagnostics=false: its extra reads were found to corrupt this
+    // exact write on real hardware -- see writeBQ27220DataMemoryField() comment.
+    const bool ok = X3GPIO::writeBQ27220DataMemoryField(address, valueMah, detailBuf, detailBufLen, false);
+    snprintf(msg, sizeof(msg), "Write %s: %s", fieldName, ok ? "ok" : "FAILED, detail follows:");
+    logStep(msg);
+    if (!ok) {
+      logStep(detailBuf);
+    }
+    return ok;
+  };
+
+  bool wroteFcc = true;
+  if (fullChargeCapacityMah != 0) {
+    wroteFcc = writeField(BQ27220_DM_ADDR_FULL_CHARGE_CAPACITY, fullChargeCapacityMah, "FullChargeCapacity");
+  } else {
+    logStep("Write FullChargeCapacity: skipped");
+  }
+
+  bool wroteDesign = true;
+  if (designCapacityMah != 0) {
+    wroteDesign = writeField(BQ27220_DM_ADDR_DESIGN_CAPACITY, designCapacityMah, "DesignCapacity");
+  } else {
+    logStep("Write DesignCapacity: skipped");
+  }
+
+  // EXIT_CFG_UPDATE_REINIT (rather than plain EXIT_CFG_UPDATE) forces the gauge
+  // to reseed RemainingCapacity/FullChargeCapacity from the new DesignCapacity.
+  const bool exitedCfgUpdate = X3GPIO::writeBQ27220Control(BQ27220_CTRL_EXIT_CFG_UPDATE_REINIT);
+  logStep(exitedCfgUpdate ? "EXIT_CFG_UPDATE_REINIT write: ok" : "EXIT_CFG_UPDATE_REINIT write: FAILED");
+
+  const bool cfgUpdateCleared = waitForBq27220CfgUpdate(false);
+  logStep(cfgUpdateCleared ? "CFGUPDATE cleared: ok" : "CFGUPDATE cleared: FAILED -- gauging may remain suspended");
+
+  snprintf(msg, sizeof(msg), "Sequence complete: FCC=%d Design=%d exit=%d cleared=%d -- verify via bq27220_dump.txt",
+           wroteFcc, wroteDesign, exitedCfgUpdate, cfgUpdateCleared);
+  logStep(msg);
+}
+
+void HalPowerManager::testBq27220DataMemoryWrite(const bool deviceIsX3, const uint16_t address,
+                                                  const uint16_t value) const {
+  if (!deviceIsX3) {
+    return;
+  }
+
+  (void)getBatteryStatus();  // bring up the gauge I2C bus, see dumpBq27220DiagnosticsToSd
+
+  Storage.mkdir("/.crosspoint");
+  HalFile logFile;
+  const bool haveLogFile = Storage.openFileForWrite("PWR", "/.crosspoint/bq27220_reprogram_log.txt", logFile);
+  if (!haveLogFile) {
+    LOG_ERR("PWR", "BQ27220 test write: failed to open reprogram log file (continuing without it)");
+  }
+  auto logStep = [&](const char* message) {
+    LOG_INF("PWR", "%s", message);
+    if (haveLogFile) {
+      logFile.printf("%s\n", message);
+    }
+  };
+
+  char msg[192];
+  snprintf(msg, sizeof(msg), "Sanity test: write 0x%04X to Data Memory address 0x%04X (write mechanism check, see "
+                              "docs/bq27220-x3-fuel-gauge-findings.md)",
+           value, address);
+  logStep(msg);
+
+  const bool unsealed = X3GPIO::writeBQ27220Control(BQ27220_CTRL_FULL_ACCESS_KEY) &&
+                         X3GPIO::writeBQ27220Control(BQ27220_CTRL_FULL_ACCESS_KEY);
+  logStep(unsealed ? "FULL ACCESS unseal: ok" : "FULL ACCESS unseal: FAILED");
+  if (!unsealed) {
+    return;
+  }
+  delay(10);
+
+  // See the matching comment in reprogramBq27220Capacity(): "ok" above only
+  // confirms the bus-level ACK, not that permission actually elevated.
+  uint16_t opStatusAfterUnseal = 0;
+  if (X3GPIO::readBQ27220OperationStatus(&opStatusAfterUnseal)) {
+    const uint8_t sec = (opStatusAfterUnseal >> 1) & 0x3;
+    const char* secName;
+    if (sec == 0b01) {
+      secName = "Full Access";
+    } else if (sec == 0b10) {
+      secName = "Unsealed (NOT Full Access)";
+    } else if (sec == 0b11) {
+      secName = "Sealed";
+    } else {
+      secName = "unknown(00)";
+    }
+    snprintf(msg, sizeof(msg), "Post-unseal OperationStatus SEC[1:0]=%u%u -> %s", (sec >> 1) & 1, sec & 1, secName);
+    logStep(msg);
+  } else {
+    logStep("Post-unseal OperationStatus read failed -- could not verify SEC state");
+  }
+
+  constexpr uint8_t kMaxCfgUpdateAttempts = 3;
+  bool enteredCfgUpdate = false;
+  for (uint8_t attempt = 1; attempt <= kMaxCfgUpdateAttempts && !enteredCfgUpdate; attempt++) {
+    if (!X3GPIO::writeBQ27220Control(BQ27220_CTRL_ENTER_CFG_UPDATE)) {
+      snprintf(msg, sizeof(msg), "ENTER_CFG_UPDATE attempt %u: I2C write failed", attempt);
+      logStep(msg);
+      delay(50);
+      continue;
+    }
+    enteredCfgUpdate = waitForBq27220CfgUpdate(true);
+    if (!enteredCfgUpdate) {
+      snprintf(msg, sizeof(msg), "ENTER_CFG_UPDATE attempt %u: write ok, CFGUPDATE bit never set within 1s", attempt);
+      logStep(msg);
+      delay(50);
+    }
+  }
+  logStep(enteredCfgUpdate ? "ENTER_CFG_UPDATE: ok" : "ENTER_CFG_UPDATE: FAILED after retries");
+  if (!enteredCfgUpdate) {
+    return;
+  }
+
+  constexpr size_t kDetailBufSize = 512;
+  auto heapDetail = makeUniqueNoThrow<char[]>(kDetailBufSize);
+  char smallFallback[128] = "";
+  char* detailBuf = heapDetail ? heapDetail.get() : smallFallback;
+  const size_t detailBufLen = heapDetail ? kDetailBufSize : sizeof(smallFallback);
+  if (!heapDetail) {
+    LOG_ERR("PWR", "OOM: %u bytes for BQ27220 write diagnostic buffer, using smaller fallback",
+            static_cast<unsigned>(kDetailBufSize));
+  }
+  detailBuf[0] = '\0';
+  // verboseDiagnostics=false: testing whether removing its extra reads (found
+  // to leak into the BlockData buffer on the previous attempt) lets this
+  // write actually commit -- see writeBQ27220DataMemoryField() comment.
+  const bool wroteOk = X3GPIO::writeBQ27220DataMemoryField(address, value, detailBuf, detailBufLen, false);
+  logStep(wroteOk ? "Test write: ok" : "Test write: FAILED, detail follows:");
+  if (!wroteOk) {
+    logStep(detailBuf);
+  }
+
+  const bool exitedCfgUpdate = X3GPIO::writeBQ27220Control(BQ27220_CTRL_EXIT_CFG_UPDATE_REINIT);
+  logStep(exitedCfgUpdate ? "EXIT_CFG_UPDATE_REINIT write: ok" : "EXIT_CFG_UPDATE_REINIT write: FAILED");
+  const bool cfgUpdateCleared = waitForBq27220CfgUpdate(false);
+  logStep(cfgUpdateCleared ? "CFGUPDATE cleared: ok" : "CFGUPDATE cleared: FAILED -- gauging may remain suspended");
+
+  snprintf(msg, sizeof(msg), "Sanity test complete: write=%d -- verify via bq27220_dump.txt", wroteOk);
+  logStep(msg);
+}
+
+void HalPowerManager::testBq27220TiHibernateExample(const bool deviceIsX3) const {
+  if (!deviceIsX3) {
+    return;
+  }
+
+  (void)getBatteryStatus();  // bring up the gauge I2C bus, see dumpBq27220DiagnosticsToSd
+
+  Storage.mkdir("/.crosspoint");
+  HalFile logFile;
+  const bool haveLogFile = Storage.openFileForWrite("PWR", "/.crosspoint/bq27220_reprogram_log.txt", logFile);
+  if (!haveLogFile) {
+    LOG_ERR("PWR", "BQ27220 TI-example test: failed to open reprogram log file (continuing without it)");
+  }
+  auto logStep = [&](const char* message) {
+    LOG_INF("PWR", "%s", message);
+    if (haveLogFile) {
+      logFile.printf("%s\n", message);
+    }
+  };
+
+  char msg[192];
+  logStep("TRM S4.6 Note literal replication test: Hibernate I -> 0 at Data Memory 0x9221");
+
+  const bool unsealed = X3GPIO::writeBQ27220Control(BQ27220_CTRL_FULL_ACCESS_KEY) &&
+                         X3GPIO::writeBQ27220Control(BQ27220_CTRL_FULL_ACCESS_KEY);
+  logStep(unsealed ? "FULL ACCESS unseal: ok" : "FULL ACCESS unseal: FAILED");
+  if (!unsealed) {
+    return;
+  }
+  delay(10);
+
+  uint16_t opStatusAfterUnseal = 0;
+  if (X3GPIO::readBQ27220OperationStatus(&opStatusAfterUnseal)) {
+    const uint8_t sec = (opStatusAfterUnseal >> 1) & 0x3;
+    snprintf(msg, sizeof(msg), "Post-unseal OperationStatus=0x%04X SEC[1:0]=%u%u", opStatusAfterUnseal,
+             (sec >> 1) & 1, sec & 1);
+    logStep(msg);
+  }
+
+  // Step 1 (TRM S4.6 Note, literal): "Write 0x0090 to 0x3E (enter CONFIG UPDATE
+  // mode), and wait 1100 ms" -- targets 0x3E directly, not Control() (0x00) as
+  // documented everywhere else in the TRM. Testing literally, as one combined
+  // 2-byte write (low byte first, per this codebase's established byte order).
+  const uint8_t step1[2] = {0x90, 0x00};
+  const bool step1Ok = X3GPIO::writeI2CBlock(I2C_ADDR_BQ27220, BQ27220_DM_ADDR_LSB_REG, step1, 2);
+  logStep(step1Ok ? "Step1 (0x0090 -> 0x3E, combined write): ok" : "Step1 (0x0090 -> 0x3E): FAILED");
+  delay(1100);
+
+  uint16_t opStatusAfterStep1 = 0;
+  if (X3GPIO::readBQ27220OperationStatus(&opStatusAfterStep1)) {
+    snprintf(msg, sizeof(msg), "After step1+1100ms: OperationStatus=0x%04X (CFGUPDATE %s)", opStatusAfterStep1,
+             (opStatusAfterStep1 & BQ27220_OP_STATUS_CFGUPDATE_MASK) ? "SET" : "clear");
+    logStep(msg);
+  } else {
+    logStep("After step1: OperationStatus read failed");
+  }
+
+  // Step 2 (literal): "Write (hex) 21 92 00, starting at 0x3E" -- one combined
+  // 3-byte transaction: address low=0x21, high=0x92 (-> Data Memory address
+  // 0x9221, little-endian), then the first BlockData() byte = 0x00.
+  const uint8_t step2[3] = {0x21, 0x92, 0x00};
+  const bool step2Ok = X3GPIO::writeI2CBlock(I2C_ADDR_BQ27220, BQ27220_DM_ADDR_LSB_REG, step2, 3);
+  logStep(step2Ok ? "Step2 (21 92 00 -> 0x3E, combined write): ok" : "Step2: FAILED");
+
+  // Step 3 (literal): "Write (hex) 4C 05, starting at 0x61" -- testing exactly
+  // as documented, even though Table 2-1 names 0x60=MACDataSum()/checksum and
+  // 0x61=MACDataLen()/length (checksum then length), while this targets 0x61
+  // first as one combined 2-byte write.
+  const uint8_t step3[2] = {0x4C, 0x05};
+  const bool step3Ok = X3GPIO::writeI2CBlock(I2C_ADDR_BQ27220, BQ27220_BLOCKDATA_LEN_REG, step3, 2);
+  logStep(step3Ok ? "Step3 (4C 05 -> 0x61, combined write): ok" : "Step3: FAILED");
+
+  delay(5);
+
+  // Verify: re-address 0x9221 and read back BlockData() -- offset 0 should now
+  // read 0x00 if this exact procedure actually committed the write.
+  uint8_t verifyBlock[32];
+  if (X3GPIO::readBQ27220BlockDataAt(0x9221, verifyBlock)) {
+    snprintf(msg, sizeof(msg), "Verify @0x9221: offset0=0x%02X (want 0x00) offset1=0x%02X offset2=0x%02X",
+             verifyBlock[0], verifyBlock[1], verifyBlock[2]);
+    logStep(msg);
+  } else {
+    logStep("Verify @0x9221: block read failed");
+  }
+
+  // Step 4 (literal): "Write 0x0091 to 0x3E (exit CONFIG UPDATE reinit)."
+  const uint8_t step4[2] = {0x91, 0x00};
+  const bool step4Ok = X3GPIO::writeI2CBlock(I2C_ADDR_BQ27220, BQ27220_DM_ADDR_LSB_REG, step4, 2);
+  logStep(step4Ok ? "Step4 (0x0091 -> 0x3E, combined write): ok" : "Step4: FAILED");
+
+  const bool cfgUpdateCleared = waitForBq27220CfgUpdate(false);
+  logStep(cfgUpdateCleared ? "CFGUPDATE cleared: ok" : "CFGUPDATE cleared: FAILED -- gauging may remain suspended");
+
+  logStep("TRM S4.6 literal replication test complete -- verify via bq27220_dump.txt");
+}
+
+void HalPowerManager::testBq27220DirectWrite(const bool deviceIsX3, const uint16_t address,
+                                              const uint16_t value) const {
+  if (!deviceIsX3) {
+    return;
+  }
+
+  (void)getBatteryStatus();  // bring up the gauge I2C bus, see dumpBq27220DiagnosticsToSd
+
+  Storage.mkdir("/.crosspoint");
+  HalFile logFile;
+  const bool haveLogFile = Storage.openFileForWrite("PWR", "/.crosspoint/bq27220_reprogram_log.txt", logFile);
+  if (!haveLogFile) {
+    LOG_ERR("PWR", "BQ27220 direct-write test: failed to open reprogram log file (continuing without it)");
+  }
+  auto logStep = [&](const char* message) {
+    LOG_INF("PWR", "%s", message);
+    if (haveLogFile) {
+      logFile.printf("%s\n", message);
+    }
+  };
+
+  char msg[192];
+  snprintf(msg, sizeof(msg), "Direct-write test (combined transactions, computed checksum): 0x%04X -> addr 0x%04X",
+           value, address);
+  logStep(msg);
+
+  const bool unsealed = X3GPIO::writeBQ27220Control(BQ27220_CTRL_FULL_ACCESS_KEY) &&
+                         X3GPIO::writeBQ27220Control(BQ27220_CTRL_FULL_ACCESS_KEY);
+  logStep(unsealed ? "FULL ACCESS unseal: ok" : "FULL ACCESS unseal: FAILED");
+  if (!unsealed) {
+    return;
+  }
+  delay(10);
+
+  uint16_t opStatusAfterUnseal = 0;
+  if (X3GPIO::readBQ27220OperationStatus(&opStatusAfterUnseal)) {
+    const uint8_t sec = (opStatusAfterUnseal >> 1) & 0x3;
+    snprintf(msg, sizeof(msg), "Post-unseal OperationStatus=0x%04X SEC[1:0]=%u%u (key=0x%04X)", opStatusAfterUnseal,
+             (sec >> 1) & 1, sec & 1, BQ27220_CTRL_FULL_ACCESS_KEY);
+    logStep(msg);
+  }
+
+  // ENTER_CFG_UPDATE via 0x3E (combined write) -- see testBq27220TiHibernateExample():
+  // confirmed reliable on the first attempt, unlike the Control()-based approach.
+  const uint8_t enter[2] = {0x90, 0x00};
+  const bool enterOk = X3GPIO::writeI2CBlock(I2C_ADDR_BQ27220, BQ27220_DM_ADDR_LSB_REG, enter, 2);
+  logStep(enterOk ? "ENTER_CFG_UPDATE (0x0090 -> 0x3E, combined write): ok" : "ENTER_CFG_UPDATE: FAILED");
+  delay(1100);
+
+  uint16_t opStatus = 0;
+  if (X3GPIO::readBQ27220OperationStatus(&opStatus)) {
+    snprintf(msg, sizeof(msg), "After enter+1100ms: OperationStatus=0x%04X (CFGUPDATE %s)", opStatus,
+             (opStatus & BQ27220_OP_STATUS_CFGUPDATE_MASK) ? "SET" : "clear");
+    logStep(msg);
+    if (!(opStatus & BQ27220_OP_STATUS_CFGUPDATE_MASK)) {
+      logStep("Aborting: CFGUPDATE not set, Data Memory write would be unsafe");
+      return;
+    }
+  } else {
+    logStep("After enter: OperationStatus read failed, aborting");
+    return;
+  }
+
+  constexpr size_t kDetailBufSize = 512;
+  auto heapDetail = makeUniqueNoThrow<char[]>(kDetailBufSize);
+  char smallFallback[128] = "";
+  char* detailBuf = heapDetail ? heapDetail.get() : smallFallback;
+  const size_t detailBufLen = heapDetail ? kDetailBufSize : sizeof(smallFallback);
+  if (!heapDetail) {
+    LOG_ERR("PWR", "OOM: %u bytes for BQ27220 write diagnostic buffer, using smaller fallback",
+            static_cast<unsigned>(kDetailBufSize));
+  }
+  detailBuf[0] = '\0';
+  const bool wroteOk = X3GPIO::writeBQ27220DataMemoryFieldDirect(address, value, detailBuf, detailBufLen);
+  logStep(wroteOk ? "Direct write: ok" : "Direct write: FAILED, detail follows:");
+  if (!wroteOk) {
+    logStep(detailBuf);
+  }
+
+  // EXIT_CFG_UPDATE_REINIT via 0x3E (combined write), matching entry's mechanism.
+  const uint8_t exit[2] = {0x91, 0x00};
+  const bool exitOk = X3GPIO::writeI2CBlock(I2C_ADDR_BQ27220, BQ27220_DM_ADDR_LSB_REG, exit, 2);
+  logStep(exitOk ? "EXIT_CFG_UPDATE_REINIT (0x0091 -> 0x3E, combined write): ok" : "EXIT_CFG_UPDATE_REINIT: FAILED");
+  const bool cfgUpdateCleared = waitForBq27220CfgUpdate(false);
+  logStep(cfgUpdateCleared ? "CFGUPDATE cleared: ok" : "CFGUPDATE cleared: FAILED -- gauging may remain suspended");
+
+  snprintf(msg, sizeof(msg), "Direct-write test complete: write=%d -- verify via bq27220_dump.txt", wroteOk);
+  logStep(msg);
 }
 
 HalPowerManager::Lock::Lock() {

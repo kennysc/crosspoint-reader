@@ -88,6 +88,60 @@ class HalPowerManager {
   // succeeded (the gauge I2C bus and the SD card are not ready any earlier).
   void dumpBq27220DiagnosticsToSd(bool deviceIsX3) const;
 
+  // One-off tool: reprograms the BQ27220's Data Memory DesignCapacity and/or
+  // FullChargeCapacity seed to the given mAh values, per
+  // docs/bq27220-x3-fuel-gauge-findings.md. 0 for either argument skips that
+  // field -- FullChargeCapacity (offset 29 of its 32-byte block) is a safe
+  // single-block write; DesignCapacity (offset 31) straddles a block
+  // boundary and is riskier, so test FullChargeCapacity alone first. No-op
+  // when deviceIsX3 is false. NOT gated for general use -- see the
+  // BQ27220_REPROGRAM_* build flags at the src/main.cpp call site; this
+  // exists to fix one specific device's factory-default (wrong) capacity and
+  // is not a general feature. Logs each step, including which exact I2C
+  // sub-transaction failed, to /.crosspoint/bq27220_reprogram_log.txt (in
+  // addition to LOG_INF/LOG_ERR) since a serial connection may not be
+  // available. Call once at boot, after Storage.begin() has succeeded, and
+  // call dumpBq27220DiagnosticsToSd() afterward to verify the result.
+  void reprogramBq27220Capacity(bool deviceIsX3, uint16_t designCapacityMah, uint16_t fullChargeCapacityMah) const;
+
+  // TEMPORARY diagnostic, not a permanent feature: writes `value` to an
+  // arbitrary Data Memory `address` and verifies it round-tripped, to test
+  // whether ANY Data Memory write actually commits on this hardware --
+  // FullChargeCapacity's write was observed being silently zeroed instead of
+  // accepted or left unchanged (docs/bq27220-x3-fuel-gauge-findings.md).
+  // Intended to be called with a field written back to its own current
+  // value (a no-op if the mechanism works). No-op when deviceIsX3 is false.
+  // Logs to /.crosspoint/bq27220_reprogram_log.txt like
+  // reprogramBq27220Capacity(); call dumpBq27220DiagnosticsToSd() after to
+  // verify.
+  void testBq27220DataMemoryWrite(bool deviceIsX3, uint16_t address, uint16_t value) const;
+
+  // TEMPORARY diagnostic, not a permanent feature: replicates TRM S4.6's
+  // "Hibernate I" Note verbatim -- the one concrete, fully worked, specific
+  // (not generic/illustrative) Data Memory write example in the entire TRM,
+  // targeting 0x3E directly for CONFIG_UPDATE entry/exit (not Control()
+  // 0x00 as documented everywhere else) and combining each step's bytes into
+  // a single I2C transaction rather than separate single-byte writes. Tests
+  // this exact literal procedure against its own documented target (Hibernate
+  // I, Data Memory address 0x9221, set to 0) before adapting it for
+  // DesignCapacity/FullChargeCapacity. See
+  // docs/bq27220-x3-fuel-gauge-findings.md. No-op when deviceIsX3 is false.
+  // Logs to /.crosspoint/bq27220_reprogram_log.txt; call
+  // dumpBq27220DiagnosticsToSd() after to see the resulting full state.
+  void testBq27220TiHibernateExample(bool deviceIsX3) const;
+
+  // TEMPORARY diagnostic, not a permanent feature: same combined-transaction,
+  // 0x3E-targeted CFG_UPDATE entry/exit mechanism proven more reliable by
+  // testBq27220TiHibernateExample(), but writing `value` to an arbitrary
+  // Data Memory `address` with a checksum computed fresh for this device's
+  // actual block content (X3GPIO::writeBQ27220DataMemoryFieldDirect), rather
+  // than TRM S4.6's hardcoded example checksum (0x4C, specific to TI's own
+  // test device's block content). See docs/bq27220-x3-fuel-gauge-findings.md.
+  // No-op when deviceIsX3 is false. Logs to
+  // /.crosspoint/bq27220_reprogram_log.txt; call dumpBq27220DiagnosticsToSd()
+  // after to verify.
+  void testBq27220DirectWrite(bool deviceIsX3, uint16_t address, uint16_t value) const;
+
   // RAII helper class to manage power saving locks
   // Usage: create an instance of Lock in a scope to disable power saving, for example when running a task that needs
   // full performance. When the Lock instance is destroyed (goes out of scope), power saving will be re-enabled.

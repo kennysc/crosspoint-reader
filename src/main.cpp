@@ -417,6 +417,51 @@ void setup() {
   }
 
   HalSystem::checkPanic();
+#ifdef BQ27220_REPROGRAM_CAPACITY_MAH
+  // One-off fix for this device's factory-default (wrong) fuel-gauge capacity --
+  // see docs/bq27220-x3-fuel-gauge-findings.md. Deliberately NOT enabled by
+  // default: set BQ27220_REPROGRAM_CAPACITY_MAH in a gitignored
+  // platformio.local.ini for exactly one flash+boot, confirm success via the
+  // dump below, then remove the flag so this never runs again.
+  //
+  // FullChargeCapacity is a safe single-block write; DesignCapacity straddles
+  // a 32-byte block boundary and is riskier (see the findings doc). Test
+  // FullChargeCapacity alone first (leave BQ27220_REPROGRAM_DESIGN_CAPACITY
+  // undefined) before also defining it to attempt DesignCapacity too.
+#ifdef BQ27220_REPROGRAM_DESIGN_CAPACITY
+  powerManager.reprogramBq27220Capacity(gpio.deviceIsX3(), BQ27220_REPROGRAM_CAPACITY_MAH, BQ27220_REPROGRAM_CAPACITY_MAH);
+#else
+  powerManager.reprogramBq27220Capacity(gpio.deviceIsX3(), 0, BQ27220_REPROGRAM_CAPACITY_MAH);
+#endif
+#endif
+#ifdef BQ27220_TEST_DM_WRITE
+  // TEMPORARY sanity check, not the capacity fix itself -- see
+  // docs/bq27220-x3-fuel-gauge-findings.md. Writes BTPDischargeSet back to
+  // its own current value (150 mAh, a no-op if the write mechanism works) to
+  // test whether ANY Data Memory write commits on this hardware, after
+  // FullChargeCapacity's write was observed being silently zeroed. Mutually
+  // exclusive with BQ27220_REPROGRAM_CAPACITY_MAH above -- set only one at a
+  // time in platformio.local.ini.
+  powerManager.testBq27220DataMemoryWrite(gpio.deviceIsX3(), BQ27220_DM_ADDR_BTP_DISCHARGE_SET, 150);
+#endif
+#ifdef BQ27220_TEST_TI_HIBERNATE_EXAMPLE
+  // TEMPORARY: replicates TRM S4.6's "Hibernate I" Note verbatim -- see
+  // docs/bq27220-x3-fuel-gauge-findings.md. Mutually exclusive with the other
+  // BQ27220_* flags above -- set only one at a time in platformio.local.ini.
+  powerManager.testBq27220TiHibernateExample(gpio.deviceIsX3());
+#endif
+#ifdef BQ27220_TEST_DIRECT_WRITE
+  // TEMPORARY: same combined-transaction, 0x3E-targeted mechanism refined
+  // against Hibernate I across several attempts (checksum register, setup
+  // step, timing, unseal key all varied with no effect -- see
+  // docs/bq27220-x3-fuel-gauge-findings.md), now pointed at the actual target
+  // (FullChargeCapacity) instead of continuing to iterate on Hibernate I,
+  // in case that field specifically is locked down rather than the
+  // mechanism being broken for every field. Mutually exclusive with the
+  // other BQ27220_* flags above -- set only one at a time in
+  // platformio.local.ini.
+  powerManager.testBq27220DirectWrite(gpio.deviceIsX3(), BQ27220_DM_ADDR_FULL_CHARGE_CAPACITY, 3000);
+#endif
   powerManager.dumpBq27220DiagnosticsToSd(gpio.deviceIsX3());
 
   APP_STATE.loadFromFile();
