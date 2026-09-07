@@ -126,3 +126,8 @@ bool HalClock::syncFromNTP() {
   setTimezone(savedTz);
   return false;
 }
+
+bool HalClock::getDateTime(Rtc::DateTime& dt) const {
+  if (!_available) return false;
+  return _sdkRtc.now(dt);
+}

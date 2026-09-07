@@ -53,6 +53,16 @@ void CrossPointState::toJson(JsonDocument& doc) const {
   doc["readerActivityLoadCount"] = readerActivityLoadCount;
   doc["lastSleepFromReader"] = lastSleepFromReader;
   doc["showBootScreen"] = showBootScreen;
+
+  doc["battSessionStartEpoch"] = battSessionStartEpoch;
+  doc["battSessionStartPct"] = battSessionStartPct;
+  doc["battLastSampleEpoch"] = battLastSampleEpoch;
+  doc["battLastSamplePct"] = battLastSamplePct;
+  doc["battLastCharging"] = battLastCharging;
+  doc["battHasSample"] = battHasSample;
+  doc["battActiveReadSeconds"] = battActiveReadSeconds;
+  doc["battLastPageTurnEpoch"] = battLastPageTurnEpoch;
+  doc["battActiveReadSecondsAtLastSample"] = battActiveReadSecondsAtLastSample;
 }
 
 bool CrossPointState::fromJson(JsonVariantConst doc) {
@@ -90,5 +100,15 @@ bool CrossPointState::fromJson(JsonVariantConst doc) {
   readerActivityLoadCount = doc["readerActivityLoadCount"] | static_cast<uint8_t>(0);
   lastSleepFromReader = doc["lastSleepFromReader"] | false;
   showBootScreen = doc["showBootScreen"] | true;
+
+  battSessionStartEpoch = doc["battSessionStartEpoch"] | static_cast<uint32_t>(0);
+  battSessionStartPct = doc["battSessionStartPct"] | static_cast<uint8_t>(0);
+  battLastSampleEpoch = doc["battLastSampleEpoch"] | static_cast<uint32_t>(0);
+  battLastSamplePct = doc["battLastSamplePct"] | static_cast<uint8_t>(0);
+  battLastCharging = doc["battLastCharging"] | false;
+  battHasSample = doc["battHasSample"] | false;
+  battActiveReadSeconds = doc["battActiveReadSeconds"] | static_cast<uint32_t>(0);
+  battLastPageTurnEpoch = doc["battLastPageTurnEpoch"] | static_cast<uint32_t>(0);
+  battActiveReadSecondsAtLastSample = doc["battActiveReadSecondsAtLastSample"] | static_cast<uint32_t>(0);
   return true;
 }
