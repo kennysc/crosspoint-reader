@@ -41,10 +41,13 @@ class HalPowerManager {
   // between the two bracketing _voltageCurveMv[] notches, then debounces it:
   // a change (either direction) must hold continuously for
   // VOLTAGE_PERCENT_CHANGE_DEBOUNCE_MS before it is shown, so a load-transient
-  // voltage sag/blip doesn't visibly move the percentage. Shared by
-  // getBatteryPercentage() and getBatteryStatus() -- both derive from the same
-  // physical voltage.
-  uint16_t computeVoltagePercent(uint16_t mv) const;
+  // voltage sag/blip doesn't visibly move the percentage. While `charging` is
+  // false the result is also clamped to never rise above the last displayed
+  // value, since rest-voltage recovery (relaxation, or the tail of an e-ink
+  // refresh's current spike) must not show as the battery gaining charge.
+  // Shared by getBatteryPercentage() and getBatteryStatus() -- both derive
+  // from the same physical voltage.
+  uint16_t computeVoltagePercent(uint16_t mv, bool charging) const;
 
   enum LockMode { None, NormalSpeed };
   LockMode currentLockMode = None;
