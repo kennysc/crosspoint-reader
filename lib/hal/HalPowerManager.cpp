@@ -149,7 +149,7 @@ uint16_t HalPowerManager::getBatteryPercentage() const {
     // user-calibrated curve instead. See CrossPointSettings::batteryPercentMode.
     if (_useVoltagePercentMode) {
       const uint16_t mv = battery.readMillivolts();
-      _batteryCachedPercent = computeVoltagePercent(mv);
+      _batteryCachedPercent = computeVoltagePercent(mv, battery.isCharging());
       return _batteryCachedPercent;
     }
 
@@ -184,13 +184,14 @@ BatteryMonitor::Status HalPowerManager::getBatteryStatus() const {
   // getBatteryPercentage(). See CrossPointSettings::batteryPercentMode.
   if (BoardConfig::ACTIVE.batteryGauge.gaugeAddr != 0 && _useVoltagePercentMode &&
       _batteryStatusCached.millivoltsKnown) {
-    _batteryStatusCached.percentage = computeVoltagePercent(_batteryStatusCached.millivolts);
+    _batteryStatusCached.percentage =
+        computeVoltagePercent(_batteryStatusCached.millivolts, _batteryStatusCached.charging);
     _batteryStatusCached.percentageKnown = true;
   }
   return _batteryStatusCached;
 }
 
-uint16_t HalPowerManager::computeVoltagePercent(const uint16_t mv) const {
+uint16_t HalPowerManager::computeVoltagePercent(const uint16_t mv, const bool charging) const {
   // 1) Raw 1%-resolution value via linear interpolation between the bracketing
   // curve notches.
   uint16_t raw;
@@ -212,6 +213,15 @@ uint16_t HalPowerManager::computeVoltagePercent(const uint16_t mv) const {
       const uint32_t offset = mv - lo;
       raw = static_cast<uint16_t>((i - 1) * 10 + (offset * 10) / span);
     }
+  }
+
+  // 1b) Rest voltage recovers under no load (relaxation) or once an e-ink
+  // refresh's current spike ends, even while the pack is still net
+  // discharging. Only let the shown percentage rise while actually charging,
+  // so it never visibly ticks up on battery power. Doesn't apply to the first
+  // read (no prior value to hold to).
+  if (!charging && _voltageDisplayPercent <= 100 && raw > _voltageDisplayPercent) {
+    raw = _voltageDisplayPercent;
   }
 
   // 2) Debounce: a change (either direction) must hold continuously for
